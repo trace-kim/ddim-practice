@@ -7,8 +7,56 @@ from torchvision.datasets import CIFAR10
 from datasets.celeba import CelebA
 from datasets.ffhq import FFHQ
 from datasets.lsun import LSUN
+from datasets.sem import SEMImageDataset
 from torch.utils.data import Subset
 import numpy as np
+
+
+def _get_sem_data_path(data_config):
+    """Return the configured SEM directory without coupling it to args.exp."""
+
+    configured_paths = []
+    for field in ("data_path", "data_dir", "path"):
+        value = getattr(data_config, field, None)
+        if value is not None:
+            configured_paths.append((field, value))
+
+    if not configured_paths:
+        raise ValueError(
+            "SEM requires a local image directory in data.data_path "
+            "(data.data_dir is also supported)"
+        )
+
+    normalized_paths = []
+    for field, value in configured_paths:
+        try:
+            value = os.fspath(value)
+        except TypeError as error:
+            raise TypeError(
+                "data.{} must be a path-like value".format(field)
+            ) from error
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("data.{} must not be empty".format(field))
+
+        normalized_paths.append(
+            (
+                field,
+                os.path.abspath(os.path.expandvars(os.path.expanduser(value))),
+            )
+        )
+
+    selected_field, selected_path = normalized_paths[0]
+    selected_comparison = os.path.normcase(os.path.normpath(selected_path))
+    for field, path in normalized_paths[1:]:
+        if os.path.normcase(os.path.normpath(path)) != selected_comparison:
+            raise ValueError(
+                "Conflicting SEM directories configured in data.{} and data.{}".format(
+                    selected_field, field
+                )
+            )
+
+    return selected_path
 
 
 class Crop(object):
@@ -174,6 +222,87 @@ def get_dataset(args, config):
             indices[int(num_items * 0.9) :],
         )
         test_dataset = Subset(dataset, test_indices)
+        dataset = Subset(dataset, train_indices)
+    elif config.data.dataset == "SEM":
+        data_path = _get_sem_data_path(config.data)
+        recursive = getattr(config.data, "recursive", False)
+        extensions = getattr(config.data, "extensions", None)
+        cache_in_memory = getattr(config.data, "cache_in_memory", False)
+        if cache_in_memory and config.data.random_flip:
+            raise ValueError(
+                "data.cache_in_memory cannot be combined with random_flip because "
+                "the transformed result is cached"
+            )
+
+        sem_test_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (config.data.image_size, config.data.image_size)
+                ),
+                transforms.ToTensor(),
+            ]
+        )
+        if config.data.random_flip:
+            sem_train_transform = transforms.Compose(
+                [
+                    transforms.Resize(
+                        (config.data.image_size, config.data.image_size)
+                    ),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.ToTensor(),
+                ]
+            )
+        else:
+            sem_train_transform = sem_test_transform
+
+        dataset = SEMImageDataset(
+            root=data_path,
+            transform=sem_train_transform,
+            channels=config.data.channels,
+            recursive=recursive,
+            extensions=extensions,
+            cache_in_memory=cache_in_memory,
+        )
+
+        validation_split = getattr(config.data, "validation_split", 0.1)
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError(
+                "data.validation_split must be in [0, 1), got {}".format(
+                    validation_split
+                )
+            )
+
+        num_items = len(dataset)
+        indices = np.arange(num_items)
+        random_state = np.random.RandomState(
+            getattr(config.data, "split_seed", 2019)
+        )
+        random_state.shuffle(indices)
+
+        num_test_items = int(num_items * validation_split)
+        if validation_split > 0 and num_items > 1:
+            num_test_items = max(1, min(num_items - 1, num_test_items))
+
+        if num_test_items:
+            test_indices = indices[-num_test_items:].tolist()
+            train_indices = indices[:-num_test_items].tolist()
+        else:
+            test_indices = []
+            train_indices = indices.tolist()
+
+        if config.data.random_flip and test_indices:
+            test_base_dataset = SEMImageDataset(
+                root=data_path,
+                transform=sem_test_transform,
+                channels=config.data.channels,
+                recursive=recursive,
+                extensions=extensions,
+                cache_in_memory=cache_in_memory,
+            )
+        else:
+            test_base_dataset = dataset
+
+        test_dataset = Subset(test_base_dataset, test_indices)
         dataset = Subset(dataset, train_indices)
     else:
         dataset, test_dataset = None, None

@@ -1,2 +1,72 @@
-.vscode
+# Python bytecode and caches
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.hypothesis/
+
+# Coverage and build artifacts
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Editors, notebooks, and operating-system files
+.vscode/
+.idea/
+*.code-workspace
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+
+# DDIM experiment output
+/exp/
+/experiments/
+/output/
+/tmp/
+/logs/
+/tensorboard/
+/image_samples/
+/checkpoints/
+/results/
+/runs/
+/wandb/
+/lightning_logs/
+
+# Model checkpoints, training logs, and dataset databases
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+events.out.tfevents.*
+*.log
+*.mdb
+*.lmdb/
+
+# Generated images and documents
+*.[pP][nN][gG]
+*.[pP][dD][fF]
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.swp

@@ -1,0 +1,60 @@
+data:
+    dataset: "SEM"
+    # Replace this with the folder containing the local SEM images.
+    data_path: "E:/PythonProjects/SEMImageAI/data/datasets/paired_miic_v0/train/target_sem"
+    image_size: 32
+    channels: 1
+    logit_transform: false
+    uniform_dequantization: false
+    gaussian_dequantization: false
+    random_flip: false
+    rescaled: true
+    num_workers: 0
+    cache_in_memory: true
+    recursive: false
+    validation_split: 0.1
+    split_seed: 2019
+    extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"]
+
+model:
+    type: "simple"
+    in_channels: 1
+    out_ch: 1
+    ch: 64
+    ch_mult: [1, 2, 2, 2]
+    num_res_blocks: 2
+    attn_resolutions: [16]
+    dropout: 0.0
+    var_type: fixedlarge
+    ema_rate: 0.999
+    ema: true
+    resamp_with_conv: true
+
+diffusion:
+    beta_schedule: linear
+    beta_start: 0.001
+    beta_end: 0.2
+    num_diffusion_timesteps: 100
+
+training:
+    batch_size: 7
+    # The runner stops by epoch, not n_iters. With 945 training images this
+    # gives 135 updates per epoch and 20,115 updates across 149 epochs.
+    n_epochs: 149
+    n_iters: 20000
+    snapshot_freq: 2500
+    validation_freq: 2500
+
+sampling:
+    batch_size: 8
+    last_only: true
+    ckpt_id: 20000
+
+optim:
+    weight_decay: 0.0
+    optimizer: "Adam"
+    lr: 0.0002
+    beta1: 0.9
+    amsgrad: false
+    eps: 0.00000001
+    grad_clip: 1.0
