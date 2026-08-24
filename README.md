@@ -1,6 +1,8 @@
 # Denoising Diffusion Implicit Models (DDIM)
 
-For new SEM experiments, use the reproducible [`ddimctl` training workflow](docs/training_workflow.md). The original `main.py` interface below is retained for legacy compatibility.
+Start here: [Training Quick Start / 학습 빠른 시작](TRAINING_GUIDE.md).
+
+For full operational details, see the reproducible [`ddimctl` training workflow](docs/training_workflow.md). The original `main.py` interface below is retained for legacy compatibility.
 
 [Jiaming Song](http://tsong.me), [Chenlin Meng](http://cs.stanford.edu/~chenlin) and [Stefano Ermon](http://cs.stanford.edu/~ermon), Stanford
 
