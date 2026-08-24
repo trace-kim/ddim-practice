@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddim-training-workflow"
+version = "0.1.0"
+description = "Reproducible, cross-platform training workflow for the DDIM SEM experiments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "lmdb>=1.4,<3",
+    "numpy>=1.26,<3",
+    "Pillow>=10,<13",
+    "pydantic>=2.10,<3",
+    "PyYAML>=6,<7",
+    "requests>=2.31,<3",
+    "rich>=13,<16",
+    "tensorboard>=2.14,<3",
+    "torch>=2.2,<3",
+    "torchvision>=0.17,<1",
+    "tqdm>=4.66,<5",
+    "typer>=0.20,<1",
+    "tzdata>=2025.1; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+tracking = [
+    "mlflow>=3,<4",
+    "nvidia-ml-py>=12",
+    "psutil>=5.9",
+]
+dev = [
+    "pytest>=8,<10",
+]
+
+[project.scripts]
+ddimctl = "ddimctl.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ddimctl*", "datasets*", "functions*", "models*", "runners*"]
+namespaces = true
+
+[tool.setuptools.data-files]
+"share/ddim-training-workflow" = ["configs/sem.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

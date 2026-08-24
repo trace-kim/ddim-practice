@@ -2,6 +2,7 @@ import os
 import logging
 import time
 import glob
+import itertools
 
 import numpy as np
 import tqdm
@@ -130,10 +131,28 @@ class Diffusion(object):
             if self.config.model.ema:
                 ema_helper.load_state_dict(states[4])
 
-        for epoch in range(start_epoch, self.config.training.n_epochs):
+        # Legacy entry point compatibility: modern configs and existing SEM
+        # configs use an exact optimizer-step budget.  Older configs without a
+        # step budget retain their epoch-based behavior.
+        max_steps = getattr(
+            self.config.training,
+            "max_steps",
+            getattr(self.config.training, "n_iters", None),
+        )
+        if max_steps is not None:
+            max_steps = int(max_steps)
+            if max_steps < 1:
+                raise ValueError("training.max_steps/n_iters must be positive")
+            epoch_iterator = itertools.count(start_epoch)
+        else:
+            epoch_iterator = range(start_epoch, self.config.training.n_epochs)
+
+        for epoch in epoch_iterator:
             data_start = time.time()
             data_time = 0
             for i, (x, y) in enumerate(train_loader):
+                if max_steps is not None and step >= max_steps:
+                    return
                 n = x.size(0)
                 data_time += time.time() - data_start
                 model.train()
@@ -171,7 +190,11 @@ class Diffusion(object):
                 if self.config.model.ema:
                     ema_helper.update(model)
 
-                if step % self.config.training.snapshot_freq == 0 or step == 1:
+                if (
+                    step % self.config.training.snapshot_freq == 0
+                    or step == 1
+                    or (max_steps is not None and step == max_steps)
+                ):
                     states = [
                         model.state_dict(),
                         optimizer.state_dict(),
@@ -188,6 +211,9 @@ class Diffusion(object):
                     torch.save(states, os.path.join(self.args.log_path, "ckpt.pth"))
 
                 data_start = time.time()
+
+                if max_steps is not None and step >= max_steps:
+                    return
 
     def sample(self):
         model = Model(self.config)

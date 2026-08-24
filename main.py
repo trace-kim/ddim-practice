@@ -1,6 +1,5 @@
 import argparse
 import traceback
-import shutil
 import logging
 import yaml
 import sys
@@ -88,6 +87,9 @@ def parse_args_and_config():
     parser.add_argument("--sequence", action="store_true")
 
     args = parser.parse_args()
+    logging.warning(
+        "python main.py is deprecated; use the typed 'ddimctl' workflow for new SEM runs"
+    )
     args.log_path = os.path.join(args.exp, "logs", args.doc)
 
     # parse config file
@@ -100,23 +102,11 @@ def parse_args_and_config():
     if not args.test and not args.sample:
         if not args.resume_training:
             if os.path.exists(args.log_path):
-                overwrite = False
-                if args.ni:
-                    overwrite = True
-                else:
-                    response = input("Folder already exists. Overwrite? (Y/N)")
-                    if response.upper() == "Y":
-                        overwrite = True
-
-                if overwrite:
-                    shutil.rmtree(args.log_path)
-                    shutil.rmtree(tb_path)
-                    os.makedirs(args.log_path)
-                    if os.path.exists(tb_path):
-                        shutil.rmtree(tb_path)
-                else:
-                    print("Folder exists. Program halted.")
-                    sys.exit(0)
+                raise FileExistsError(
+                    "Refusing to overwrite existing legacy run directory: {}".format(
+                        args.log_path
+                    )
+                )
             else:
                 os.makedirs(args.log_path)
 
@@ -164,22 +154,11 @@ def parse_args_and_config():
                 os.makedirs(args.image_folder)
             else:
                 if not (args.fid or args.interpolation):
-                    overwrite = False
-                    if args.ni:
-                        overwrite = True
-                    else:
-                        response = input(
-                            f"Image folder {args.image_folder} already exists. Overwrite? (Y/N)"
+                    raise FileExistsError(
+                        "Refusing to overwrite existing sample directory: {}".format(
+                            args.image_folder
                         )
-                        if response.upper() == "Y":
-                            overwrite = True
-
-                    if overwrite:
-                        shutil.rmtree(args.image_folder)
-                        os.makedirs(args.image_folder)
-                    else:
-                        print("Output image folder exists. Program halted.")
-                        sys.exit(0)
+                    )
 
     # add device
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -224,6 +203,7 @@ def main():
             runner.train()
     except Exception:
         logging.error(traceback.format_exc())
+        return 1
 
     return 0
 
