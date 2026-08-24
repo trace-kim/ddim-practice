@@ -1,14 +1,16 @@
-# Training Quick Start / 학습 빠른 시작
+# DDIM Training Quick Start / DDIM 학습 빠른 시작
 
-This is the shortest supported path for starting a training run and watching it safely.
+[English](#english) | [한국어](#korean)
 
-이 문서는 학습을 안전하게 시작하고 진행 상황을 확인하는 가장 간단한 방법을 설명합니다.
+---
 
-Run all commands from the repository root. Replace `local-4060ti` with your configured machine ID when needed.
+<a id="english"></a>
 
-모든 명령은 저장소 최상위 폴더에서 실행합니다. 필요하면 `local-4060ti`를 설정한 머신 ID로 바꾸세요.
+## English
 
-## 1. Install / 설치
+This guide covers the shortest supported path for starting training and watching its progress. Run all commands from the repository root.
+
+### 1. Install
 
 Windows PowerShell:
 
@@ -26,90 +28,213 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-Install the optional tracking package only on a machine that will run the MLflow results UI:
-
-MLflow 결과 UI를 실행할 머신에서만 선택 사항인 tracking 패키지를 설치합니다.
+On the workstation that will run the MLflow results UI, also install:
 
 ```text
 python -m pip install -e ".[tracking]"
 ```
 
-On an offline HPC, use the approved prebuilt environment or wheelhouse described in the [full workflow guide](docs/training_workflow.md).
+For an offline HPC, use the approved environment or wheelhouse described in the [full workflow guide](docs/training_workflow.md).
 
-인터넷이 없는 HPC에서는 [전체 워크플로 가이드](docs/training_workflow.md)에 설명된 승인된 사전 구축 환경 또는 wheelhouse를 사용하세요.
+### 2. Configure and check the machine
 
-## 2. Configure the machine once / 머신 최초 설정
+Create a machine profile once. Choose a short ID and reuse it in later commands:
 
 ```text
 ddimctl machine configure --id local-4060ti
 ```
 
-Enter these values when prompted:
+Use dataset alias `sem`. Select the executor that matches the machine:
 
-메시지가 표시되면 다음 값을 입력합니다.
+- Windows: `windows-task`
+- HPC with `sbatch`: `slurm`
+- HPC reached through a corporate job portal: `external-hpc`
 
-- Dataset alias / 데이터셋 별칭: `sem`
-- Executor: `windows-task` on Windows; `slurm` when `sbatch` is available; otherwise `external-hpc` for a corporate portal
-- 실행 방식: Windows에서는 `windows-task`, `sbatch`를 사용할 수 있으면 `slurm`, 기업 포털을 사용하면 `external-hpc`
-- Dataset path, runs path, Python path, and expected GPU / 데이터셋 경로, 실행 결과 저장 경로, Python 경로, 예상 GPU
-
-Check the setup before training:
-
-학습 전에 설정을 확인합니다.
+Enter paths that exist on that machine, then check the setup:
 
 ```text
 ddimctl doctor --machine local-4060ti --exercise-executor
 ```
 
-Do not start a long run until every required check passes.
+Do not start a long run until the required checks pass.
 
-필수 항목이 모두 통과하기 전에는 장시간 학습을 시작하지 마세요.
+### 3. Start training
 
-## 3. Start training / 학습 시작
-
-Use the guided wizard to avoid typing a long command:
-
-긴 명령을 직접 입력하지 않도록 안내 마법사를 사용합니다.
+Use the wizard so you do not need to type a long training command:
 
 ```text
 ddimctl train wizard --machine local-4060ti
 ```
 
-1. Enter a clear run label, such as `sem32-baseline`.
-2. Press Enter to accept a value from `configs/sem.yml`, or enter a new value.
-3. Review the displayed settings and exact command.
+During the wizard:
+
+1. Enter a clear label such as `sem32-baseline`.
+2. Press Enter to keep a value from `configs/sem.yml`, or type a new value.
+3. Review the resolved settings and exact command.
 4. Confirm the launch.
-5. Copy the path printed after `Created run bundle:`. You will use it below.
+5. Copy the path printed after `Created run bundle:`.
 
-1. `sem32-baseline`처럼 알아보기 쉬운 실행 이름을 입력합니다.
-2. `configs/sem.yml`의 값을 사용하려면 Enter를 누르고, 바꾸려면 새 값을 입력합니다.
-3. 표시된 설정과 실제 실행 명령을 확인합니다.
-4. 학습 시작 여부를 확인합니다.
-5. `Created run bundle:` 뒤에 표시되는 경로를 복사합니다. 아래 명령에서 사용합니다.
+With `windows-task` or `slurm`, closing the terminal does not stop training. `external-hpc` creates `worker.sh`; submit that file through the approved corporate portal. Do not use `foreground` for a long run.
 
-With `windows-task` or `slurm`, closing the launch terminal does not stop training. Do not use the `foreground` executor for a long run.
+### 4. Watch progress
 
-`windows-task` 또는 `slurm`을 사용하면 실행 터미널을 닫아도 학습이 중단되지 않습니다. 장시간 학습에는 `foreground`를 사용하지 마세요.
+Set the run path printed by the wizard:
 
-## 4. Watch progress / 진행 상황 확인
+```powershell
+# Windows PowerShell
+$run = 'E:\path\to\the\created\run'
+```
 
-Set the run path printed by the wizard.
+```bash
+# Linux
+run='/path/to/the/created/run'
+```
 
-마법사가 출력한 실행 경로를 지정합니다.
+Check the current state:
+
+```text
+ddimctl run status "$run"
+```
+
+Follow the training log:
+
+```text
+ddimctl run logs "$run" --stream stdout --follow
+```
+
+Press Ctrl+C to stop following the log. Training continues.
+
+Start the live TensorBoard UI:
+
+```text
+tensorboard --logdir "$run/tensorboard" --host 127.0.0.1 --port 6006
+```
+
+Open <http://127.0.0.1:6006> to watch loss, validation, and generated samples.
+
+### 5. Review completed results
+
+TensorBoard is the live progress UI. MLflow is the detailed review UI for completed runs. This project does not include a separate custom results website.
+
+After `ddimctl run status "$run"` reports `completed`:
+
+```text
+ddimctl track serve --port 5000
+```
+
+Wait until <http://127.0.0.1:5000> opens, then publish the run:
+
+```text
+ddimctl track publish "$run" --tracking-uri http://127.0.0.1:5000 --experiment ddim-sem
+```
+
+In MLflow, select **Model training**, open `ddim-sem`, and select the run.
+
+For an offline HPC run, copy the entire run folder to the workstation before publishing it.
+
+### 6. Stop or resume
+
+Request a safe stop that saves a checkpoint:
+
+```text
+ddimctl run stop "$run"
+```
+
+After the run has stopped, resume it with the same settings:
+
+```text
+ddimctl run resume "$run"
+```
+
+Use `--force` only when a normal stop cannot work. It may lose progress after the latest checkpoint.
+
+---
+
+<a id="korean"></a>
+
+## 한국어
+
+이 문서는 학습을 시작하고 진행 상황을 확인하는 데 필요한 최소 절차만 설명합니다. 모든 명령은 저장소 최상위 폴더에서 실행합니다.
+
+### 1. 설치
 
 Windows PowerShell:
 
 ```powershell
-$run = 'E:\path\to\the\created\run'
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
 ```
 
 Linux:
 
 ```bash
-run='/path/to/the/created/run'
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-Check the current state:
+MLflow 결과 화면을 실행할 워크스테이션에는 다음 패키지도 설치합니다.
+
+```text
+python -m pip install -e ".[tracking]"
+```
+
+인터넷이 차단된 HPC에서는 [전체 워크플로 가이드](docs/training_workflow.md)에 설명된 승인된 환경 또는 wheelhouse를 사용합니다.
+
+### 2. 머신 설정 및 확인
+
+머신 프로필은 처음 한 번만 만듭니다. 짧은 ID를 정하고 이후 명령에서도 같은 ID를 사용합니다.
+
+```text
+ddimctl machine configure --id local-4060ti
+```
+
+데이터셋 별칭은 `sem`을 사용합니다. 머신에 맞는 실행 방식을 선택합니다.
+
+- Windows: `windows-task`
+- `sbatch`를 사용할 수 있는 HPC: `slurm`
+- 기업용 작업 포털을 통해 접속하는 HPC: `external-hpc`
+
+해당 머신에서 실제로 접근할 수 있는 경로를 입력한 뒤 설정을 검사합니다.
+
+```text
+ddimctl doctor --machine local-4060ti --exercise-executor
+```
+
+필수 검사를 모두 통과하기 전에는 장시간 학습을 시작하지 마세요.
+
+### 3. 학습 시작
+
+긴 학습 명령을 직접 입력하지 않도록 마법사를 사용합니다.
+
+```text
+ddimctl train wizard --machine local-4060ti
+```
+
+마법사에서는 다음 순서로 진행합니다.
+
+1. `sem32-baseline`처럼 알아보기 쉬운 실행 이름을 입력합니다.
+2. `configs/sem.yml`의 값을 유지하려면 Enter를 누르고, 변경하려면 새 값을 입력합니다.
+3. 최종 설정과 실제 실행 명령을 확인합니다.
+4. 학습 시작 여부를 확인합니다.
+5. `Created run bundle:` 뒤에 표시된 경로를 복사합니다.
+
+`windows-task` 또는 `slurm`을 사용하면 터미널을 닫아도 학습이 계속됩니다. `external-hpc`는 `worker.sh`를 생성하므로 승인된 기업 포털을 통해 이 파일을 제출해야 합니다. 장시간 학습에는 `foreground`를 사용하지 마세요.
+
+### 4. 진행 상황 확인
+
+마법사가 출력한 실행 경로를 변수에 저장합니다.
+
+```powershell
+# Windows PowerShell
+$run = 'E:\path\to\the\created\run'
+```
+
+```bash
+# Linux
+run='/path/to/the/created/run'
+```
 
 현재 상태를 확인합니다.
 
@@ -117,63 +242,43 @@ Check the current state:
 ddimctl run status "$run"
 ```
 
-Follow the training log. Press Ctrl+C to stop following the log; this does not stop training.
-
-학습 로그를 실시간으로 봅니다. Ctrl+C는 로그 보기만 종료하며 학습은 계속됩니다.
+학습 로그를 실시간으로 확인합니다.
 
 ```text
 ddimctl run logs "$run" --stream stdout --follow
 ```
 
-Open the live TensorBoard UI:
+Ctrl+C를 누르면 로그 보기만 종료되고 학습은 계속됩니다.
 
-실시간 TensorBoard UI를 엽니다.
+실시간 TensorBoard 화면을 시작합니다.
 
 ```text
 tensorboard --logdir "$run/tensorboard" --host 127.0.0.1 --port 6006
 ```
 
-Open <http://127.0.0.1:6006> in a browser. TensorBoard is for live loss, validation, and sample checks.
+브라우저에서 <http://127.0.0.1:6006>을 열어 손실값, 검증 지표, 생성 샘플을 확인합니다.
 
-브라우저에서 <http://127.0.0.1:6006>을 엽니다. TensorBoard에서 실시간 손실값, 검증 지표, 생성 샘플을 확인할 수 있습니다.
+### 5. 완료된 결과 확인
 
-## 5. Review completed results / 완료 결과 확인
+TensorBoard는 실시간 진행 상황을 보는 화면입니다. MLflow는 완료된 실행을 자세히 검토하는 화면입니다. 이 프로젝트에는 별도의 자체 제작 결과 웹사이트가 없습니다.
 
-TensorBoard is the live UI. MLflow is the deeper review UI for completed runs; this project does not provide a separate custom web results UI.
-
-TensorBoard는 실시간 UI입니다. MLflow는 완료된 실행을 자세히 검토하는 UI이며, 이 프로젝트에는 별도의 자체 제작 웹 결과 UI가 없습니다.
-
-After `ddimctl run status "$run"` reports `completed`, start the local MLflow UI:
-
-`ddimctl run status "$run"`이 `completed`를 표시하면 로컬 MLflow UI를 시작합니다.
+`ddimctl run status "$run"`이 `completed`를 표시하면 다음 명령을 실행합니다.
 
 ```text
 ddimctl track serve --port 5000
 ```
 
-Wait until <http://127.0.0.1:5000> opens, then publish from another terminal.
-
-<http://127.0.0.1:5000>이 열릴 때까지 기다린 다음, 다른 터미널에서 결과를 등록합니다.
-
-Publish the completed run:
-
-완료된 실행 결과를 등록합니다.
+브라우저에서 <http://127.0.0.1:5000>이 열릴 때까지 기다린 뒤 실행 결과를 등록합니다.
 
 ```text
 ddimctl track publish "$run" --tracking-uri http://127.0.0.1:5000 --experiment ddim-sem
 ```
 
-Open <http://127.0.0.1:5000>, select **Model training**, open `ddim-sem`, and select your run. MLflow shows the command, parameters, metric charts, and samples.
+MLflow에서 **Model training** → `ddim-sem` → 실행 이름을 선택합니다.
 
-브라우저에서 <http://127.0.0.1:5000>을 열고 **Model training** → `ddim-sem` → 실행 이름을 선택합니다. MLflow에서 명령, 설정, 지표 그래프와 생성 샘플을 확인할 수 있습니다.
+인터넷이 차단된 HPC에서 실행한 경우, 전체 실행 폴더를 워크스테이션으로 복사한 뒤 등록합니다.
 
-For an offline HPC, copy the complete run folder to the Windows workstation first, then publish it there.
-
-인터넷이 없는 HPC에서는 전체 실행 폴더를 Windows 워크스테이션으로 복사한 뒤 그곳에서 등록하세요.
-
-## 6. Stop or resume / 중지 또는 재개
-
-Request a safe stop that saves a checkpoint:
+### 6. 중지 또는 재개
 
 체크포인트를 저장하고 안전하게 중지합니다.
 
@@ -181,23 +286,10 @@ Request a safe stop that saves a checkpoint:
 ddimctl run stop "$run"
 ```
 
-Resume the same run after it has stopped:
-
-중지된 실행을 같은 설정으로 이어서 학습합니다.
+실행이 중지된 뒤 같은 설정으로 학습을 재개합니다.
 
 ```text
 ddimctl run resume "$run"
 ```
 
-Use `--force` only when a normal stop cannot work because it may lose progress after the latest checkpoint.
-
 정상 중지가 동작하지 않을 때만 `--force`를 사용하세요. 마지막 체크포인트 이후의 진행 내용이 손실될 수 있습니다.
-
-## Daily workflow / 매번 사용하는 순서
-
-1. Activate the virtual environment. / 가상 환경을 활성화합니다.
-2. Run `ddimctl doctor --machine local-4060ti`. / `ddimctl doctor --machine local-4060ti`를 실행합니다.
-3. Start with `ddimctl train wizard --machine local-4060ti`. / `ddimctl train wizard --machine local-4060ti`로 시작합니다.
-4. Copy the created run path. / 생성된 실행 경로를 복사합니다.
-5. Watch logs and TensorBoard. / 로그와 TensorBoard를 확인합니다.
-6. After completion, publish to MLflow. / 완료 후 MLflow에 등록합니다.
