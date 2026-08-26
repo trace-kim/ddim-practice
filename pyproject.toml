@@ -40,7 +40,7 @@ ddimctl = "ddimctl.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ddimctl*", "datasets*", "functions*", "models*", "runners*"]
+include = ["ddimctl*", "datasets*", "functions*", "models*", "noising_pipeline*", "runners*"]
 namespaces = true
 
 [tool.setuptools.data-files]
