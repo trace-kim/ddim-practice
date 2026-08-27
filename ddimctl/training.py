@@ -187,8 +187,9 @@ def select_device(requested: str | torch.device | None = None) -> torch.device:
         count = torch.cuda.device_count()
         if count != 1:
             raise RuntimeError(
-                "The v1 worker requires exactly one visible CUDA GPU; found {}. "
-                "Set CUDA_VISIBLE_DEVICES or request one scheduler GPU.".format(count)
+                "The training worker expected one isolated CUDA GPU but found {}. "
+                "Launch through ddimctl or restrict CUDA_VISIBLE_DEVICES before starting "
+                "the worker directly.".format(count)
             )
         if device.index is None:
             device = torch.device("cuda", 0)

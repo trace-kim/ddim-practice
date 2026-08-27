@@ -106,6 +106,13 @@ class ModernTrainingTests(unittest.TestCase):
                 select_device()
             self.assertEqual(select_device("cpu").type, "cpu")
 
+    def test_worker_retains_single_isolated_gpu_invariant(self):
+        with mock.patch("ddimctl.training.torch.cuda.is_available", return_value=True), mock.patch(
+            "ddimctl.training.torch.cuda.device_count", return_value=4
+        ):
+            with self.assertRaisesRegex(RuntimeError, "expected one isolated CUDA GPU"):
+                select_device()
+
     def test_worker_rejects_dataset_changed_after_bundle_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

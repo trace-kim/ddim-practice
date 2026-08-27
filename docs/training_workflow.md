@@ -49,7 +49,7 @@ python -m pip install -e ".[tracking]"
 
 ## Configure a machine once
 
-Profiles contain operational facts only: executor, runs directory, dataset aliases and paths, Python executable, time zone, and expected GPU. They intentionally contain no learning rate, batch size, model size, or other experiment conditions.
+Profiles contain operational facts only: executor, runs directory, dataset aliases and paths, Python executable, time zone, selected GPU index, and expected GPU. They intentionally contain no learning rate, batch size, model size, or other experiment conditions.
 
 Run the interactive configurator on each target machine:
 
@@ -70,13 +70,15 @@ Recommended answers are:
 
 Use dataset alias `sem` unless there is a concrete reason to introduce another alias. For the nested-SSH system, run configuration in the actual target login environment; paths from the local PC or an intermediate jump host are not usable by a compute job.
 
+`gpu_index` is zero-based within the GPUs visible to the launching process. On a workstation that exposes four GPUs, values `0` through `3` select one GPU for the run. If `CUDA_VISIBLE_DEVICES` already contains an allocation, the index selects an entry from that list. Use index `0` when a scheduler allocates exactly one GPU.
+
 Profiles are stored outside the repository. On Windows they are under `%APPDATA%\ddimctl\profiles`; on Linux they are under `$XDG_CONFIG_HOME/ddimctl/profiles`, or `~/.config/ddimctl/profiles` when `XDG_CONFIG_HOME` is unset.
 
 Use `ddimctl machine list` to see configured IDs and `ddimctl machine show <id>` to review the exact operational values. Re-running `configure` asks before replacing an existing profile.
 
 ## Verify the target before training
 
-The doctor validates Python, dataset and runs paths, a real CUDA allocation/kernel, the expected GPU name, and the selected executor:
+The doctor validates Python, dataset and runs paths, a real CUDA kernel on the selected GPU, the expected GPU name, and the selected executor. A workstation may expose multiple GPUs; doctor reports which visible index will be isolated for the worker:
 
 ```text
 ddimctl doctor --machine local-4060ti --exercise-executor
@@ -121,7 +123,7 @@ Executor behavior is machine-specific:
 - `slurm` retains `attempts/NNN/job.sbatch`, submits it with `sbatch`, and records the job ID.
 - `external-hpc` writes `worker.sh` and `probe.sh` and leaves the run in `prepared`. Submit `worker.sh` through the approved corporate scheduler or portal; `ddimctl` cannot infer that site-specific step.
 
-Version 1 intentionally supports one training process and exactly one visible CUDA GPU. Request one scheduler GPU. If an environment exposes several GPUs, restrict visibility using the site's supported mechanism before launching; multi-GPU/DDP training is not implemented.
+Version 1 intentionally supports one training process and one selected CUDA GPU per run. Multi-GPU workstations are supported: `ddimctl` isolates the profile's `gpu_index` before the worker imports PyTorch. Request one scheduler GPU and use index `0` inside that allocation. Multi-GPU/DDP training within a single run is not implemented.
 
 ## What a run contains
 

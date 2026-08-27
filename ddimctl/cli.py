@@ -228,6 +228,13 @@ def _show_plan(profile: MachineProfile, spec: TrainingSpec, argv: tuple[str, ...
     rows = (
         ("Machine", profile.machine_id),
         ("Executor", profile.executor.value),
+        (
+            "GPU",
+            "visible index {}{}".format(
+                profile.gpu_index,
+                f", expected {profile.expected_gpu!r}" if profile.expected_gpu else "",
+            ),
+        ),
         ("Dataset", f"{spec.dataset_alias} -> {profile.dataset_path(spec.dataset_alias)}"),
         ("Resolution / model", f"{spec.image_size}px, ch={spec.model_ch}, mult={spec.ch_mult}"),
         ("Diffusion", f"{spec.diffusion_steps} steps, beta={spec.beta_start}..{spec.beta_end}"),
@@ -327,32 +334,51 @@ def _launch_preflight(profile: MachineProfile) -> None:
     if profile.executor not in {ExecutorType.FOREGROUND, ExecutorType.WINDOWS_TASK}:
         return
     gpu_report = _probe_configured_gpu(profile)
-    if not gpu_report["available"]:
-        raise RuntimeError("CUDA is unavailable; refusing to submit an accidentally CPU-bound run")
-    visible = int(gpu_report["count"])
-    if visible != 1:
-        raise RuntimeError(
-            f"v1 requires exactly one visible CUDA GPU, but this process sees {visible}; "
-            "restrict GPU visibility before launching"
-        )
-    actual = str(gpu_report["names"][0])
-    if profile.expected_gpu and profile.expected_gpu.casefold() not in actual.casefold():
-        raise RuntimeError(
-            f"visible GPU {actual!r} does not match profile expectation {profile.expected_gpu!r}"
-        )
+    error = _gpu_validation_error(profile, gpu_report)
+    if error is not None:
+        raise RuntimeError(error)
 
 
 def _probe_configured_gpu(profile: MachineProfile) -> dict[str, Any]:
-    source = (
-        "import json,torch,sys; "
-        "index=int(sys.argv[1]); available=torch.cuda.is_available(); "
-        "names=[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]; "
-        "device=torch.device('cuda',index) if available else None; "
-        "x=torch.ones((16,16),device=device) if available else None; "
-        "value=float((x@x).sum().item()) if available else None; "
-        "print(json.dumps({'available':available,'count':torch.cuda.device_count(),"
-        "'names':names,'kernel':value,'torch':torch.__version__}))"
+    source = """
+import json
+import os
+import sys
+
+import torch
+
+index = int(sys.argv[1])
+available = bool(torch.cuda.is_available())
+count = int(torch.cuda.device_count())
+names = [torch.cuda.get_device_name(i) for i in range(count)]
+selection_error = None
+selected_name = None
+kernel = None
+if not available or count == 0:
+    selection_error = "CUDA is unavailable; refusing to train on CPU"
+elif index >= count:
+    selection_error = (
+        "configured gpu_index {} is out of range for {} visible CUDA GPU(s)"
+        .format(index, count)
     )
+else:
+    device = torch.device("cuda", index)
+    x = torch.ones((16, 16), device=device)
+    kernel = float((x @ x).sum().item())
+    selected_name = names[index]
+print(json.dumps({
+    "available": available,
+    "count": count,
+    "names": names,
+    "configured_index": index,
+    "selected_index": index if selection_error is None else None,
+    "selected_name": selected_name,
+    "selection_error": selection_error,
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "kernel": kernel,
+    "torch": torch.__version__,
+}))
+"""
     result = subprocess.run(
         [profile.python_executable, "-c", source, str(profile.gpu_index)],
         check=False,
@@ -367,6 +393,49 @@ def _probe_configured_gpu(profile: MachineProfile) -> dict[str, Any]:
     except (IndexError, json.JSONDecodeError) as error:
         raise RuntimeError("configured Python returned an invalid GPU probe result") from error
     return report
+
+
+def _gpu_validation_error(
+    profile: MachineProfile, gpu_report: dict[str, Any]
+) -> str | None:
+    if not bool(gpu_report.get("available")) or int(gpu_report.get("count", 0)) < 1:
+        return "CUDA is unavailable; refusing to submit an accidentally CPU-bound run"
+    selection_error = gpu_report.get("selection_error")
+    if selection_error:
+        return str(selection_error)
+    selected_name = gpu_report.get("selected_name")
+    if not selected_name:
+        return "configured Python GPU probe did not identify the selected CUDA GPU"
+    if (
+        profile.expected_gpu
+        and profile.expected_gpu.casefold() not in str(selected_name).casefold()
+    ):
+        return (
+            f"selected GPU {str(selected_name)!r} does not match profile expectation "
+            f"{profile.expected_gpu!r}"
+        )
+    return None
+
+
+def _gpu_report_detail(profile: MachineProfile, gpu_report: dict[str, Any]) -> str:
+    count = int(gpu_report.get("count", 0))
+    names = [str(name) for name in gpu_report.get("names", [])]
+    details = [f"{count} visible CUDA GPU(s)"]
+    selected_name = gpu_report.get("selected_name")
+    selected_index = gpu_report.get("selected_index")
+    if selected_name is not None and selected_index is not None:
+        details.append(f"selected visible index {selected_index}: {selected_name}")
+    elif names:
+        details.append(", ".join(names))
+    visible_devices = gpu_report.get("cuda_visible_devices")
+    if visible_devices is not None:
+        details.append(f"CUDA_VISIBLE_DEVICES={visible_devices!r}")
+    error = _gpu_validation_error(profile, gpu_report)
+    if error is not None:
+        details.append(error)
+    else:
+        details.append("worker will isolate this GPU as logical cuda:0")
+    return "; ".join(details)
 
 
 def _make_launch_request(
@@ -527,7 +596,7 @@ def configure_machine(
     dataset_path = Path(Prompt.ask("SEM image directory")).expanduser()
     python_executable = Prompt.ask("Python executable", default=sys.executable)
     timezone = Prompt.ask("Output timezone", default="Asia/Seoul")
-    gpu_index = IntPrompt.ask("GPU index", default=0)
+    gpu_index = IntPrompt.ask("Visible GPU index for this run", default=0)
     expected_gpu = Prompt.ask(
         "Expected GPU name substring (optional, e.g. H100 or RTX A6000)", default=""
     )
@@ -635,16 +704,8 @@ def doctor(
         checks.append(("Runs directory", False, str(error)))
     try:
         gpu_report = _probe_configured_gpu(profile)
-        cuda = bool(gpu_report["available"]) and gpu_report["count"] == 1
-        detail = ", ".join(gpu_report["names"]) or "CUDA unavailable"
-        if profile.expected_gpu and not any(
-            profile.expected_gpu.casefold() in name.casefold() for name in gpu_report["names"]
-        ):
-            cuda = False
-            detail += f" (expected {profile.expected_gpu!r})"
-        if gpu_report["count"] != 1:
-            detail += f" ({gpu_report['count']} visible GPUs; v1 requires exactly one)"
-        checks.append(("CUDA", cuda, detail))
+        error = _gpu_validation_error(profile, gpu_report)
+        checks.append(("CUDA", error is None, _gpu_report_detail(profile, gpu_report)))
     except Exception as error:
         checks.append(("CUDA", False, str(error)))
 

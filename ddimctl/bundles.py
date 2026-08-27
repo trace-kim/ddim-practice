@@ -550,6 +550,8 @@ def _worker_bootstrap_source() -> str:
     return '''"""Run the worker from this bundle's verified source snapshot."""
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+import json
+import os
 import runpy
 import sys
 
@@ -576,11 +578,44 @@ def selected_attempt(run_dir):
     return max(existing, default=0) + 1
 
 
+def isolate_cuda_gpu(manifest_path):
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    machine = payload.get("machine")
+    if not isinstance(machine, dict):
+        raise ValueError("run manifest has no machine profile")
+    gpu_index = int(machine.get("gpu_index", 0))
+    if gpu_index < 0:
+        raise ValueError("manifest gpu_index must be nonnegative")
+
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if inherited is None:
+        selected = str(gpu_index)
+    else:
+        visible = [item.strip() for item in inherited.split(",") if item.strip()]
+        if not visible:
+            raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose any GPU")
+        if gpu_index >= len(visible):
+            raise RuntimeError(
+                "manifest gpu_index %d is out of range for CUDA_VISIBLE_DEVICES=%r"
+                % (gpu_index, inherited)
+            )
+        selected = visible[gpu_index]
+    os.environ["CUDA_VISIBLE_DEVICES"] = selected
+    print(
+        "worker GPU isolation: visible index %d -> CUDA_VISIBLE_DEVICES=%r"
+        % (gpu_index, selected),
+        flush=True,
+    )
+
+
 sys.dont_write_bytecode = True
 bundle_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(bundle_root / "source"))
 run_value = option_value("--run")
 if run_value is None:
+    manifest_value = option_value("--manifest")
+    if manifest_value is not None:
+        isolate_cuda_gpu(Path(manifest_value).expanduser().resolve())
     runpy.run_module("ddimctl.worker", run_name="__main__")
 else:
     run_root = Path(run_value).expanduser().resolve()
@@ -589,6 +624,7 @@ else:
     with (attempt_dir / "stdout.log").open("a", encoding="utf-8", buffering=1) as stdout_log, \\
          (attempt_dir / "stderr.log").open("a", encoding="utf-8", buffering=1) as stderr_log, \\
          redirect_stdout(stdout_log), redirect_stderr(stderr_log):
+        isolate_cuda_gpu(run_root / "manifest.json")
         runpy.run_module("ddimctl.worker", run_name="__main__")
 '''
 

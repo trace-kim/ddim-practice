@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import json
 import hashlib
 import io
+import json
+import os
+import subprocess
+import sys
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from ddimctl.bundles import (
+    _worker_bootstrap_source,
     atomic_write_json,
     create_run_bundle,
     create_source_snapshot,
@@ -135,6 +139,53 @@ def test_run_bundle_is_complete_collision_safe_and_round_trips(tmp_path: Path) -
 
     with pytest.raises(ConfigurationError, match="checksum mismatch"):
         materialize_source_snapshot(run_root)
+
+
+@pytest.mark.parametrize(
+    ("gpu_index", "inherited_visibility", "expected_visibility"),
+    (
+        (2, None, "2"),
+        (1, "3, 5,7", "5"),
+        (0, "GPU-allocated-by-scheduler", "GPU-allocated-by-scheduler"),
+    ),
+)
+def test_worker_bootstrap_isolates_selected_gpu_before_importing_worker(
+    tmp_path: Path,
+    gpu_index: int,
+    inherited_visibility: str | None,
+    expected_visibility: str,
+) -> None:
+    run_root = tmp_path / f"run-{gpu_index}"
+    package = run_root / "source" / "ddimctl"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "worker.py").write_text(
+        "import os\nprint('worker-visible=' + repr(os.environ.get('CUDA_VISIBLE_DEVICES')))\n",
+        encoding="utf-8",
+    )
+    (run_root / "attempts" / "001").mkdir(parents=True)
+    atomic_write_json(run_root / "manifest.json", {"machine": {"gpu_index": gpu_index}})
+    bootstrap = run_root / "worker-bootstrap.py"
+    bootstrap.write_text(_worker_bootstrap_source(), encoding="utf-8")
+
+    environment = os.environ.copy()
+    if inherited_visibility is None:
+        environment.pop("CUDA_VISIBLE_DEVICES", None)
+    else:
+        environment["CUDA_VISIBLE_DEVICES"] = inherited_visibility
+    result = subprocess.run(
+        [sys.executable, str(bootstrap), "--run", str(run_root), "--attempt", "1"],
+        cwd=run_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    worker_log = (run_root / "attempts" / "001" / "stdout.log").read_text(encoding="utf-8")
+    assert f"worker-visible={expected_visibility!r}" in worker_log
+    assert "worker GPU isolation" in worker_log
 
 
 def test_materialization_rejects_parent_traversal_before_extraction(tmp_path: Path) -> None:
