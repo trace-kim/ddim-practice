@@ -72,6 +72,20 @@ Training is exactly the same as DDPM with the following:
 python main.py --config {DATASET}.yml --exp {PROJECT_PATH} --doc {MODEL_NAME} --ni
 ```
 
+Legacy YAML values can be overridden without editing the config file. Common settings have direct flags:
+
+```text
+python main.py --config sem_ddim_local_32.yml --exp experiments/sem64 --doc sem64-run1 --image-size 64 --batch-size 4 --learning-rate 0.0001 --max-steps 20000 --ni
+```
+
+Available convenience flags are `--image-size`, `--batch-size`, `--learning-rate`, `--max-steps`, `--data-path`, `--num-workers`, `--diffusion-steps`, and `--model-ch`. For any other existing YAML leaf, repeat `--set SECTION.KEY=VALUE`; values use YAML syntax:
+
+```text
+python main.py --config sem_ddim_local_32.yml --exp experiments/custom --doc custom-run --set model.dropout=0.1 --set "model.ch_mult=[1, 2, 2, 4]" --set data.random_flip=true --ni
+```
+
+The resolved values are saved to `<exp>/logs/<doc>/config.yml`. Unknown keys and incompatible value types are rejected instead of silently creating misspelled settings.
+
 ### Sampling from the model
 
 #### Sampling from the generalized model for FID evaluation

@@ -1,19 +1,125 @@
 import argparse
-import traceback
 import logging
-import yaml
-import sys
 import os
-import torch
+import sys
+import traceback
+from typing import Any, Sequence
+
 import numpy as np
+import torch
 import torch.utils.tensorboard as tb
+import yaml
 
 from runners.diffusion import Diffusion
 
 torch.set_printoptions(sci_mode=False)
 
 
-def parse_args_and_config():
+_NAMED_CONFIG_OVERRIDES = {
+    "image_size": (("data", "image_size"),),
+    "batch_size": (("training", "batch_size"),),
+    "learning_rate": (("optim", "lr"),),
+    "max_steps": (("training", "max_steps"), ("training", "n_iters")),
+    "data_path": (("data", "data_path"), ("data", "data_dir"), ("data", "path")),
+    "num_workers": (("data", "num_workers"),),
+    "diffusion_steps": (("diffusion", "num_diffusion_timesteps"),),
+    "model_ch": (("model", "ch"),),
+}
+
+
+def _config_path_exists(config: dict[str, Any], path: tuple[str, ...]) -> bool:
+    current: Any = config
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+    return True
+
+
+def _coerce_config_override(current: Any, value: Any, path: tuple[str, ...]) -> Any:
+    label = ".".join(path)
+    if isinstance(current, dict):
+        raise ValueError(f"{label} is a section; override one of its leaf values")
+    if current is None:
+        return value
+    if isinstance(current, bool):
+        if not isinstance(value, bool):
+            raise ValueError(f"{label} expects a boolean")
+        return value
+    if isinstance(current, int):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{label} expects an integer")
+        return value
+    if isinstance(current, float):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"{label} expects a number")
+        return float(value)
+    if isinstance(current, str):
+        if not isinstance(value, str):
+            raise ValueError(f"{label} expects a string")
+        return value
+    if isinstance(current, list):
+        if not isinstance(value, list):
+            raise ValueError(f"{label} expects a YAML list")
+        return value
+    if not isinstance(value, type(current)):
+        raise ValueError(f"{label} expects {type(current).__name__}")
+    return value
+
+
+def _set_config_override(
+    config: dict[str, Any], path: tuple[str, ...], value: Any
+) -> None:
+    if not path or any(not key for key in path):
+        raise ValueError("config override paths must not contain empty components")
+    current: Any = config
+    for key in path[:-1]:
+        if not isinstance(current, dict) or key not in current:
+            raise ValueError(f"unknown config key: {'.'.join(path)}")
+        current = current[key]
+    leaf = path[-1]
+    if not isinstance(current, dict) or leaf not in current:
+        raise ValueError(f"unknown config key: {'.'.join(path)}")
+    current[leaf] = _coerce_config_override(current[leaf], value, path)
+
+
+def apply_config_overrides(
+    config: dict[str, Any], args: argparse.Namespace
+) -> tuple[str, ...]:
+    """Apply typed convenience flags and repeated dotted YAML overrides."""
+
+    applied: list[str] = []
+    for argument, candidate_paths in _NAMED_CONFIG_OVERRIDES.items():
+        value = getattr(args, argument, None)
+        if value is None:
+            continue
+        path = next(
+            (candidate for candidate in candidate_paths if _config_path_exists(config, candidate)),
+            None,
+        )
+        if path is None:
+            choices = " or ".join(".".join(candidate) for candidate in candidate_paths)
+            raise ValueError(f"--{argument.replace('_', '-')} requires config key {choices}")
+        _set_config_override(config, path, value)
+        applied.append(f"{'.'.join(path)}={value!r}")
+
+    for override in getattr(args, "config_overrides", ()):
+        key, separator, raw_value = override.partition("=")
+        if not separator or not key.strip():
+            raise ValueError("--set must use SECTION.KEY=VALUE syntax")
+        path = tuple(part.strip() for part in key.split("."))
+        try:
+            value = yaml.safe_load(raw_value)
+        except yaml.YAMLError as error:
+            raise ValueError(f"invalid YAML value for {key.strip()}: {error}") from error
+        _set_config_override(config, path, value)
+        applied.append(f"{'.'.join(path)}={value!r}")
+    return tuple(applied)
+
+
+def parse_args_and_config(
+    argv: Sequence[str] | None = None,
+) -> tuple[argparse.Namespace, argparse.Namespace]:
     parser = argparse.ArgumentParser(description=globals()["__doc__"])
 
     parser.add_argument(
@@ -85,16 +191,46 @@ def parse_args_and_config():
         help="eta used to control the variances of sigma",
     )
     parser.add_argument("--sequence", action="store_true")
+    parser.add_argument("--image-size", type=int, help="Override data.image_size")
+    parser.add_argument("--batch-size", type=int, help="Override training.batch_size")
+    parser.add_argument("--learning-rate", type=float, help="Override optim.lr")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        help="Override training.max_steps or legacy training.n_iters",
+    )
+    parser.add_argument("--data-path", type=str, help="Override the configured dataset path")
+    parser.add_argument("--num-workers", type=int, help="Override data.num_workers")
+    parser.add_argument(
+        "--diffusion-steps",
+        type=int,
+        help="Override diffusion.num_diffusion_timesteps",
+    )
+    parser.add_argument("--model-ch", type=int, help="Override model.ch")
+    parser.add_argument(
+        "--set",
+        dest="config_overrides",
+        action="append",
+        default=[],
+        metavar="SECTION.KEY=VALUE",
+        help="Override any existing YAML leaf; may be repeated",
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     logging.warning(
         "python main.py is deprecated; use the typed 'ddimctl' workflow for new SEM runs"
     )
     args.log_path = os.path.join(args.exp, "logs", args.doc)
 
     # parse config file
-    with open(os.path.join("configs", args.config), "r") as f:
+    with open(os.path.join("configs", args.config), "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        parser.error("config file must contain a YAML mapping")
+    try:
+        args.applied_config_overrides = apply_config_overrides(config, args)
+    except ValueError as error:
+        parser.error(str(error))
     new_config = dict2namespace(config)
 
     tb_path = os.path.join(args.exp, "tensorboard", args.doc)
@@ -110,8 +246,8 @@ def parse_args_and_config():
             else:
                 os.makedirs(args.log_path)
 
-            with open(os.path.join(args.log_path, "config.yml"), "w") as f:
-                yaml.dump(new_config, f, default_flow_style=False)
+            with open(os.path.join(args.log_path, "config.yml"), "w", encoding="utf-8") as f:
+                yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
         new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
         # setup logger
@@ -192,6 +328,10 @@ def main():
     logging.info("Writing log file to {}".format(args.log_path))
     logging.info("Exp instance id = {}".format(os.getpid()))
     logging.info("Exp comment = {}".format(args.comment))
+    if args.applied_config_overrides:
+        logging.info(
+            "Config overrides = {}".format(", ".join(args.applied_config_overrides))
+        )
 
     try:
         runner = Diffusion(args, config)
