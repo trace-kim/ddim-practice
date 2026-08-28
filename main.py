@@ -3,10 +3,11 @@ import logging
 import os
 import sys
 import traceback
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.utils.tensorboard as tb
 import yaml
 
@@ -25,6 +26,33 @@ _NAMED_CONFIG_OVERRIDES = {
     "diffusion_steps": (("diffusion", "num_diffusion_timesteps"),),
     "model_ch": (("model", "ch"),),
 }
+
+
+def distributed_process_info(
+    environ: Mapping[str, str] | None = None,
+    local_rank_override: int | None = None,
+) -> tuple[int, int, int]:
+    """Return ``(rank, local_rank, world_size)`` from the torchrun environment."""
+
+    values = os.environ if environ is None else environ
+    try:
+        rank = int(values.get("RANK", "0"))
+        local_rank = (
+            int(local_rank_override)
+            if local_rank_override is not None
+            else int(values.get("LOCAL_RANK", "0"))
+        )
+        world_size = int(values.get("WORLD_SIZE", "1"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("RANK, LOCAL_RANK, and WORLD_SIZE must be integers") from error
+
+    if world_size < 1:
+        raise ValueError("WORLD_SIZE must be positive")
+    if rank < 0 or rank >= world_size:
+        raise ValueError("RANK must be between 0 and WORLD_SIZE - 1")
+    if local_rank < 0:
+        raise ValueError("LOCAL_RANK must be nonnegative")
+    return rank, local_rank, world_size
 
 
 def _config_path_exists(config: dict[str, Any], path: tuple[str, ...]) -> bool:
@@ -215,11 +243,29 @@ def parse_args_and_config(
         metavar="SECTION.KEY=VALUE",
         help="Override any existing YAML leaf; may be repeated",
     )
+    parser.add_argument(
+        "--local-rank",
+        "--local_rank",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     args = parser.parse_args(argv)
-    logging.warning(
-        "python main.py is deprecated; use the typed 'ddimctl' workflow for new SEM runs"
-    )
+    try:
+        args.rank, args.local_rank, args.world_size = distributed_process_info(
+            local_rank_override=args.local_rank
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    args.distributed = args.world_size > 1
+    args.is_main_process = args.rank == 0
+    if args.distributed and (args.test or args.sample):
+        parser.error("torchrun multi-process execution is supported for training only")
+    if args.is_main_process:
+        logging.warning(
+            "python main.py is deprecated; use the typed 'ddimctl' workflow for new SEM runs"
+        )
     args.log_path = os.path.join(args.exp, "logs", args.doc)
 
     # parse config file
@@ -235,38 +281,40 @@ def parse_args_and_config(
 
     tb_path = os.path.join(args.exp, "tensorboard", args.doc)
 
+    new_config.tb_logger = None
     if not args.test and not args.sample:
-        if not args.resume_training:
-            if os.path.exists(args.log_path):
-                raise FileExistsError(
-                    "Refusing to overwrite existing legacy run directory: {}".format(
-                        args.log_path
+        if args.is_main_process:
+            if not args.resume_training:
+                if os.path.exists(args.log_path):
+                    raise FileExistsError(
+                        "Refusing to overwrite existing legacy run directory: {}".format(
+                            args.log_path
+                        )
                     )
-                )
-            else:
                 os.makedirs(args.log_path)
 
-            with open(os.path.join(args.log_path, "config.yml"), "w", encoding="utf-8") as f:
-                yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+                with open(
+                    os.path.join(args.log_path, "config.yml"), "w", encoding="utf-8"
+                ) as f:
+                    yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
-        new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
-        # setup logger
-        level = getattr(logging, args.verbose.upper(), None)
-        if not isinstance(level, int):
-            raise ValueError("level {} not supported".format(args.verbose))
+            new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
+            # setup logger
+            level = getattr(logging, args.verbose.upper(), None)
+            if not isinstance(level, int):
+                raise ValueError("level {} not supported".format(args.verbose))
 
-        handler1 = logging.StreamHandler()
-        handler2 = logging.FileHandler(os.path.join(args.log_path, "stdout.txt"))
-        formatter = logging.Formatter(
-            "%(levelname)s - %(filename)s - %(asctime)s - %(message)s"
-        )
-        handler1.setFormatter(formatter)
-        handler2.setFormatter(formatter)
-        logger = logging.getLogger()
-        logger.addHandler(handler1)
-        logger.addHandler(handler2)
-        logger.setLevel(level)
-
+            handler1 = logging.StreamHandler()
+            handler2 = logging.FileHandler(os.path.join(args.log_path, "stdout.txt"))
+            formatter = logging.Formatter(
+                "%(levelname)s - %(filename)s - %(asctime)s - %(message)s"
+            )
+            handler1.setFormatter(formatter)
+            handler2.setFormatter(formatter)
+            logger = logging.getLogger()
+            logger.addHandler(handler1)
+            logger.addHandler(handler2)
+            logger.setLevel(level)
     else:
         level = getattr(logging, args.verbose.upper(), None)
         if not isinstance(level, int):
@@ -297,15 +345,29 @@ def parse_args_and_config(
                     )
 
     # add device
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    logging.info("Using device: {}".format(device))
+    if args.distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("torchrun DDP training requires CUDA")
+        if args.local_rank >= torch.cuda.device_count():
+            raise RuntimeError(
+                "LOCAL_RANK {} is not available; found {} visible CUDA device(s)".format(
+                    args.local_rank, torch.cuda.device_count()
+                )
+            )
+        torch.cuda.set_device(args.local_rank)
+        device = torch.device("cuda", args.local_rank)
+    else:
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    if args.is_main_process:
+        logging.info("Using device: {}".format(device))
     new_config.device = device
 
     # set random seed
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    process_seed = args.seed + args.rank
+    torch.manual_seed(process_seed)
+    np.random.seed(process_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(process_seed)
 
     torch.backends.cudnn.benchmark = True
 
@@ -325,16 +387,21 @@ def dict2namespace(config):
 
 def main():
     args, config = parse_args_and_config()
-    logging.info("Writing log file to {}".format(args.log_path))
-    logging.info("Exp instance id = {}".format(os.getpid()))
-    logging.info("Exp comment = {}".format(args.comment))
-    if args.applied_config_overrides:
-        logging.info(
-            "Config overrides = {}".format(", ".join(args.applied_config_overrides))
-        )
+    if args.is_main_process:
+        logging.info("Writing log file to {}".format(args.log_path))
+        logging.info("Exp instance id = {}".format(os.getpid()))
+        logging.info("Exp comment = {}".format(args.comment))
+        if args.applied_config_overrides:
+            logging.info(
+                "Config overrides = {}".format(", ".join(args.applied_config_overrides))
+            )
 
+    exit_code = 0
     try:
-        runner = Diffusion(args, config)
+        if args.distributed:
+            dist.init_process_group(backend="nccl", init_method="env://")
+            dist.barrier()
+        runner = Diffusion(args, config, device=config.device)
         if args.sample:
             runner.sample()
         elif args.test:
@@ -342,10 +409,15 @@ def main():
         else:
             runner.train()
     except Exception:
-        logging.error(traceback.format_exc())
-        return 1
+        logging.error("rank %s failed:\n%s", args.rank, traceback.format_exc())
+        exit_code = 1
+    finally:
+        if config.tb_logger is not None:
+            config.tb_logger.close()
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

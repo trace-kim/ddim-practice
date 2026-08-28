@@ -7,7 +7,10 @@ import itertools
 import numpy as np
 import tqdm
 import torch
+import torch.distributed as dist
 import torch.utils.data as data
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 
 from models.diffusion import Model
 from models.ema import EMAHelper
@@ -17,6 +20,25 @@ from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path
 
 import torchvision.utils as tvu
+
+
+LOG_EVERY_STEPS = 10
+
+
+def per_rank_batch_size(global_batch_size, world_size):
+    global_batch_size = int(global_batch_size)
+    world_size = int(world_size)
+    if global_batch_size < 1:
+        raise ValueError("training.batch_size must be positive")
+    if world_size < 1:
+        raise ValueError("world size must be positive")
+    if global_batch_size % world_size:
+        raise ValueError(
+            "global training.batch_size {} must be divisible by DDP world size {}".format(
+                global_batch_size, world_size
+            )
+        )
+    return global_batch_size // world_size
 
 
 def torch2hwcuint8(x, clip=False):
@@ -99,29 +121,68 @@ class Diffusion(object):
     def train(self):
         args, config = self.args, self.config
         tb_logger = self.config.tb_logger
+        distributed = bool(getattr(args, "distributed", False))
+        rank = int(getattr(args, "rank", 0))
+        world_size = int(getattr(args, "world_size", 1))
+        is_main_process = rank == 0
+        if distributed and (not dist.is_available() or not dist.is_initialized()):
+            raise RuntimeError("DDP process group is not initialized")
+
         dataset, test_dataset = get_dataset(args, config)
+        batch_size = per_rank_batch_size(config.training.batch_size, world_size)
+        train_sampler = (
+            DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=True,
+                seed=int(args.seed),
+            )
+            if distributed
+            else None
+        )
         train_loader = data.DataLoader(
             dataset,
-            batch_size=config.training.batch_size,
-            shuffle=True,
+            batch_size=batch_size,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
             num_workers=config.data.num_workers,
         )
+        if is_main_process:
+            logging.info(
+                "training with global batch %s (%s per rank across %s rank(s))",
+                config.training.batch_size,
+                batch_size,
+                world_size,
+            )
         model = Model(config)
 
         model = model.to(self.device)
-        model = torch.nn.DataParallel(model)
+        if distributed:
+            model = DistributedDataParallel(
+                model,
+                device_ids=[self.device.index],
+                output_device=self.device.index,
+            )
+            ema_model = model.module
+        else:
+            model = torch.nn.DataParallel(model)
+            ema_model = model
 
         optimizer = get_optimizer(self.config, model.parameters())
 
         if self.config.model.ema:
             ema_helper = EMAHelper(mu=self.config.model.ema_rate)
-            ema_helper.register(model)
+            ema_helper.register(ema_model)
         else:
             ema_helper = None
 
         start_epoch, step = 0, 0
         if self.args.resume_training:
-            states = torch.load(os.path.join(self.args.log_path, "ckpt.pth"))
+            states = torch.load(
+                os.path.join(self.args.log_path, "ckpt.pth"),
+                map_location=self.device,
+            )
             model.load_state_dict(states[0])
 
             states[1]["param_groups"][0]["eps"] = self.config.optim.eps
@@ -148,6 +209,8 @@ class Diffusion(object):
             epoch_iterator = range(start_epoch, self.config.training.n_epochs)
 
         for epoch in epoch_iterator:
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
             data_start = time.time()
             data_time = 0
             for i, (x, y) in enumerate(train_loader):
@@ -170,12 +233,6 @@ class Diffusion(object):
                 t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
                 loss = loss_registry[config.model.type](model, x, t, e, b)
 
-                tb_logger.add_scalar("loss", loss, global_step=step)
-
-                logging.info(
-                    f"step: {step}, loss: {loss.item()}, data time: {data_time / (i+1)}"
-                )
-
                 optimizer.zero_grad()
                 loss.backward()
 
@@ -188,9 +245,25 @@ class Diffusion(object):
                 optimizer.step()
 
                 if self.config.model.ema:
-                    ema_helper.update(model)
+                    ema_helper.update(ema_model)
 
-                if (
+                should_log = is_main_process and (
+                    step == 1
+                    or step % LOG_EVERY_STEPS == 0
+                    or (max_steps is not None and step == max_steps)
+                )
+                if should_log:
+                    scalar_loss = loss.item()
+                    if tb_logger is not None:
+                        tb_logger.add_scalar("loss", scalar_loss, global_step=step)
+                    logging.info(
+                        "step: %s, loss: %s, data time: %s",
+                        step,
+                        scalar_loss,
+                        data_time / (i + 1),
+                    )
+
+                if is_main_process and (
                     step % self.config.training.snapshot_freq == 0
                     or step == 1
                     or (max_steps is not None and step == max_steps)
