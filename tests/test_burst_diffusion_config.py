@@ -50,9 +50,19 @@ def test_load_config_round_trips_yaml(tmp_path: Path) -> None:
 
 
 def test_shipped_configs_are_valid() -> None:
-    for name in ("smoke.yml", "bbbc038_p10.yml", "miic_p10.yml"):
+    for name in (
+        "smoke.yml",
+        "bbbc038_p10.yml",
+        "miic_p10.yml",
+        "bbbc038_p10_rollout.yml",
+        "miic_p10_rollout.yml",
+    ):
         config = load_config(REPO_ROOT / "configs" / "burst_diffusion" / name)
         assert config.schedule.num_steps >= 1
+    for name in ("bbbc038_p10_rollout.yml", "miic_p10_rollout.yml"):
+        config = load_config(REPO_ROOT / "configs" / "burst_diffusion" / name)
+        assert config.rollout_active
+        assert config.training.rollout.fraction == pytest.approx(0.5)
 
 
 def test_unknown_keys_are_rejected_in_every_section() -> None:

@@ -86,6 +86,35 @@ class ValidationBatch:
     clean: torch.Tensor  # [B, C, S, S] float32 in [-1, 1]
 
 
+@dataclass(frozen=True)
+class RolloutPairInfo:
+    """Provenance of one self-rollout training pair, for tests and debugging."""
+
+    source_index: int
+    crop_yx: tuple[int, int]
+    seed_replica: int
+    target_replica: int
+    stop_level: int
+
+
+@dataclass
+class RolloutPairBatch:
+    """Raw material for self-rollout finetuning (method doc S5).
+
+    The data layer stays torch-model-free: it supplies the real seed frame the
+    sampler will start from, the REAL fresh target frame (never a model
+    output), and the nominal level at which the trajectory state will be
+    harvested; ``burst_diffusion.rollout`` turns seeds into pseudo-average
+    inputs. Seed and target are crops of the SAME window, and the target
+    replica differs from the seed replica -- the seed's noise is inside the
+    pseudo-average, so a seed target would re-create the Theorem 2 degeneracy.
+    """
+
+    seed: torch.Tensor  # [R, C, S, S] float32 in [-1, 1]: real frame, level T
+    target: torch.Tensor  # [R, C, S, S] float32 in [-1, 1]: real fresh frame
+    stop_level: torch.Tensor  # [R] int64 in {1..T-1}: nominal harvest level
+
+
 class BurstCache:
     """Load a burst dataset's manifest and cache every frame in RAM as uint8."""
 
@@ -298,18 +327,21 @@ class BatchFactory:
         self.antithetic = antithetic
         self._rng = np.random.default_rng(seed)
 
-    def _sample_t_values(self) -> np.ndarray:
+    def _sample_t_values(self, count: int) -> np.ndarray:
         if not self.antithetic:
-            return self._rng.integers(1, self.num_steps + 1, size=self.batch_size)
-        half = math.ceil(self.batch_size / 2)
+            return self._rng.integers(1, self.num_steps + 1, size=count)
+        half = math.ceil(count / 2)
         drawn = self._rng.integers(1, self.num_steps + 1, size=half)
         mirrored = self.num_steps + 1 - drawn
-        return np.concatenate([drawn, mirrored])[: self.batch_size]
+        return np.concatenate([drawn, mirrored])[:count]
 
     def sample_batch(
-        self, *, return_info: bool = False
+        self, *, count: int | None = None, return_info: bool = False
     ) -> TrainingBatch | tuple[TrainingBatch, list[SampleInfo]]:
-        t_values = self._sample_t_values()
+        count = self.batch_size if count is None else count
+        if count < 1:
+            raise ValueError(f"count must be >= 1, got {count}")
+        t_values = self._sample_t_values(count)
         size = self.image_size
         x_list: list[np.ndarray] = []
         eps_list: list[np.ndarray] = []
@@ -348,6 +380,72 @@ class BatchFactory:
             x_t=torch.from_numpy(np.stack(x_list)),
             t=torch.as_tensor(t_values, dtype=torch.float32),
             eps=torch.from_numpy(np.stack(eps_list)),
+        )
+        if return_info:
+            return batch, info
+        return batch
+
+    def _sample_stop_levels(self, count: int) -> np.ndarray:
+        """Nominal harvest levels, uniform over {1..T-1} (the inference sampler
+        visits each level exactly once per run; T itself is the raw real frame,
+        already covered by ordinary training). Antithetic pairing mirrors
+        within the same range: ``u <-> T - u``."""
+        if not self.antithetic:
+            return self._rng.integers(1, self.num_steps, size=count)
+        half = math.ceil(count / 2)
+        drawn = self._rng.integers(1, self.num_steps, size=half)
+        mirrored = self.num_steps - drawn
+        return np.concatenate([drawn, mirrored])[:count]
+
+    def rollout_pair_batch(
+        self, *, count: int, return_info: bool = False
+    ) -> RolloutPairBatch | tuple[RolloutPairBatch, list[RolloutPairInfo]]:
+        """Seed frames + REAL fresh targets + harvest levels for self-rollout.
+
+        Model outputs never appear here: the target side of every pair is a
+        real frame drawn from the cache, from a replica different from the
+        seed's (see :class:`RolloutPairBatch`).
+        """
+        if count < 1:
+            raise ValueError(f"count must be >= 1, got {count}")
+        if self.num_steps < 2:
+            raise ValueError(
+                f"rollout pairs need num_steps >= 2, got {self.num_steps}: with T = 1 "
+                "the sampler has no intermediate pseudo-average states"
+            )
+        stop_levels = self._sample_stop_levels(count)
+        size = self.image_size
+        seed_list: list[np.ndarray] = []
+        target_list: list[np.ndarray] = []
+        info: list[RolloutPairInfo] = []
+        for stop_level in stop_levels:
+            source = self.cache.train_sources[
+                int(self._rng.integers(len(self.cache.train_sources)))
+            ]
+            height, width = source.clean.shape[:2]
+            top = int(self._rng.integers(0, height - size + 1))
+            left = int(self._rng.integers(0, width - size + 1))
+            permutation = self._rng.permutation(len(source.frames))
+            seed_replica = int(permutation[0])
+            target_replica = int(permutation[1])
+
+            window = np.s_[top : top + size, left : left + size]
+            seed_list.append(_to_chw(_to_model_range(source.frames[seed_replica][window])))
+            target_list.append(_to_chw(_to_model_range(source.frames[target_replica][window])))
+            if return_info:
+                info.append(
+                    RolloutPairInfo(
+                        source_index=source.source_index,
+                        crop_yx=(top, left),
+                        seed_replica=seed_replica,
+                        target_replica=target_replica,
+                        stop_level=int(stop_level),
+                    )
+                )
+        batch = RolloutPairBatch(
+            seed=torch.from_numpy(np.stack(seed_list)),
+            target=torch.from_numpy(np.stack(target_list)),
+            stop_level=torch.as_tensor(stop_levels, dtype=torch.int64),
         )
         if return_info:
             return batch, info

@@ -48,6 +48,19 @@ class ModelConfig(_StrictModel):
         return self.num_groups if self.num_groups is not None else min(32, self.ch)
 
 
+class RolloutConfig(_StrictModel):
+    """Opt-in self-rollout finetuning stage (method doc S5, Q&A Q6).
+
+    A ``fraction`` of every batch is replaced by the sampler's own pseudo-average
+    states (generated on the fly) as network INPUTS, conditioned on the nominal
+    sampler level; the targets for those samples remain REAL fresh frames.
+    ``fraction: 0`` (or omitting the block) is bit-identical to baseline training.
+    """
+
+    fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    use_ema: bool = True
+
+
 class TrainingConfig(_StrictModel):
     run_dir: Path
     batch_size: int = Field(default=16, ge=1)
@@ -66,6 +79,7 @@ class TrainingConfig(_StrictModel):
     val_every: int = Field(default=1000, ge=1)
     val_images: int = Field(default=8, ge=1)
     checkpoint_every: int = Field(default=2000, ge=1)
+    rollout: RolloutConfig | None = None
 
 
 class SamplingConfig(_StrictModel):
@@ -83,6 +97,11 @@ class Config(_StrictModel):
     @property
     def effective_out_ch(self) -> int:
         return self.model.out_ch if self.model.out_ch is not None else self.data.channels
+
+    @property
+    def rollout_active(self) -> bool:
+        rollout = self.training.rollout
+        return rollout is not None and rollout.fraction > 0.0
 
     @model_validator(mode="after")
     def _check_structure(self) -> "Config":
@@ -116,6 +135,18 @@ class Config(_StrictModel):
                     f"attention at resolution {resolution} costs O((H*W)^2) memory; "
                     "resolutions above 16 are rarely affordable",
                     stacklevel=2,
+                )
+        if self.rollout_active:
+            if self.schedule.num_steps < 2:
+                raise ValueError(
+                    "training.rollout needs schedule.num_steps >= 2: with T = 1 the "
+                    "sampler has no intermediate pseudo-average states to train on"
+                )
+            if self.training.rollout.use_ema and not self.training.ema:
+                raise ValueError(
+                    "training.rollout.use_ema requires training.ema: inference samples "
+                    "with the EMA weights, so rollout states should be generated with "
+                    "them too (set rollout.use_ema: false to use the live weights)"
                 )
         return self
 

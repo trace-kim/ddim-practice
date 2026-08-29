@@ -1,0 +1,46 @@
+# Self-rollout finetuning stage on top of the miic_p10 baseline (method doc
+# S5): half of every batch is the sampler's own pseudo-average states (inputs
+# only, EMA-generated), targets stay real fresh frames. Launch FROM the trained
+# baseline checkpoint -- max_steps 40000 continues its 30000 by 10000 finetune
+# steps:
+#   python -m burst_diffusion train --config configs/burst_diffusion/miic_p10_rollout.yml `
+#     --resume-from runs/burst_diffusion/miic_p10/ckpt_latest.pt
+# Gap readout during training: val/psnr_pred_pseudo_t01 (should climb toward
+# the real-average prediction PSNR); guard: val/psnr_pred_t15 must not regress.
+data:
+  dataset_dir: data/MIIC-burst-p10
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  split_seed: 2019
+schedule:
+  num_steps: 15
+  target_mode: fresh
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/miic_p10_rollout
+  batch_size: 8
+  max_steps: 40000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000
+  rollout:
+    fraction: 0.5
+    use_ema: true
+sampling:
+  output_mode: both
+  num_sample_steps: null

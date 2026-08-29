@@ -102,6 +102,9 @@ Config reference (`configs/burst_diffusion/*.yml`; unknown keys are rejected):
 | `training.max_steps`, `lr`, `grad_clip`, `ema`, `ema_rate`, `antithetic`, `seed` | optimization; defaults follow the legacy DDIM recipe |
 | `training.log_every / val_every / checkpoint_every / val_images` | cadence |
 | `training.device` | `auto` / `cpu` / `cuda` |
+| `training.rollout` | opt-in self-rollout finetuning stage (omit for ordinary training); see below |
+| `training.rollout.fraction` | share of each batch drawn as rollout pairs (default 0.5; `0` is bit-identical to baseline) |
+| `training.rollout.use_ema` | generate rollout states with the EMA weights, matching inference (default true; requires `training.ema`) |
 | `sampling.output_mode`, `num_sample_steps` | defaults for the sampler |
 
 **Reading the logs — important:**
@@ -126,6 +129,33 @@ Config reference (`configs/burst_diffusion/*.yml`; unknown keys are rejected):
   uninterrupted one bit-for-bit.
 - Checkpoints: `ckpt_latest.pt` (rolling) + `ckpt_<step>.pt` milestones;
   written atomically; loaded with `weights_only=True`.
+
+### Self-rollout finetuning (closing the train/inference gap)
+
+After a baseline run, an opt-in second stage trains the network on the
+sampler's *own* intermediate pseudo-averages as inputs (targets stay real
+fresh frames — see the method doc §5 for why that keeps training grounded).
+Use a config with a `training.rollout` block, a **new** `run_dir`, and
+`max_steps` continuing past the baseline's, then resume from the baseline
+checkpoint:
+
+```powershell
+python -m burst_diffusion train --config configs/burst_diffusion/bbbc038_p10_rollout.yml `
+  --resume-from runs/burst_diffusion/bbbc038_p10/ckpt_latest.pt
+```
+
+(The "was written with a different config" warning is expected — that is the
+point of resuming into the finetune config.) Watch:
+
+- `val/psnr_pred_pseudo_t01` — the gap readout: prediction PSNR at `t=1` fed
+  the model's own full-trajectory pseudo-average. Should climb toward the
+  real-average numbers.
+- `val/psnr_pred_t15` / `_t08` — the real-input guard: must not regress.
+- `train/loss_by_t_rollout/*` — per-level losses of the rollout half of each
+  batch (the real half stays under `train/loss_by_t/*`).
+
+Steps are ~2–3× slower than baseline (each batch runs a no-grad sampler
+trajectory to generate its rollout states).
 
 ## 4. Denoise a measurement
 

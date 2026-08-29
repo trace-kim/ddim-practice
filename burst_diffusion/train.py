@@ -29,9 +29,10 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from .config import Config
-from .data import BatchFactory, BurstCache, ValidationBatch
+from .data import BatchFactory, BurstCache, TrainingBatch, ValidationBatch
 from .ema import EMAHelper, ema_parameters
 from .metrics import psnr
+from .rollout import harvest_rollout_states
 from .schedule import min_replicas
 from .unet import build_unet
 
@@ -127,6 +128,26 @@ class Trainer:
             antithetic=config.training.antithetic,
             seed=config.training.seed,
         )
+        self._rollout_count = 0
+        if config.rollout_active:
+            self._rollout_count = round(
+                config.training.rollout.fraction * config.training.batch_size
+            )
+            if self._rollout_count == 0:
+                warnings.warn(
+                    f"rollout.fraction {config.training.rollout.fraction} with "
+                    f"batch_size {config.training.batch_size} rounds to zero rollout "
+                    "samples per batch; the rollout stage is inactive",
+                    stacklevel=2,
+                )
+            elif self._rollout_count == config.training.batch_size:
+                warnings.warn(
+                    "rollout.fraction 1.0 removes real-average inputs from the "
+                    "training mix entirely; the original competency can erode "
+                    "(keep a real fraction, see the method doc S5)",
+                    stacklevel=2,
+                )
+        self._real_count = config.training.batch_size - self._rollout_count
         self.model = build_unet(config).to(self.device)
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -235,12 +256,90 @@ class Trainer:
                     writer.add_image(
                         "val/input_pred_clean", np.concatenate(rows, axis=-2), self.step
                     )
+            if self.config.rollout_active:
+                # The train/inference-gap readout (probe B at t=1): predict from
+                # the sampler's own full-trajectory pseudo-average. Should climb
+                # toward val/psnr_pred_t01-style real-average numbers as the
+                # rollout finetuning takes hold.
+                num_steps = self.config.schedule.num_steps
+                seed_batch = self.factory.val_batch(level=num_steps, count=count)
+                seeds = seed_batch.x_t.to(self.device)
+                states = harvest_rollout_states(
+                    self.model,
+                    seeds,
+                    torch.ones(seeds.shape[0], dtype=torch.int64),
+                    num_steps=num_steps,
+                )
+                prediction = self.model(
+                    states, torch.ones(seeds.shape[0], device=self.device)
+                )
+                clean01 = ((seed_batch.clean + 1.0) / 2.0).numpy()
+                pred01 = ((prediction.clamp(-1.0, 1.0) + 1.0) / 2.0).cpu().numpy()
+                psnr_values = [
+                    psnr(np.moveaxis(clean01[i], 0, -1), np.moveaxis(pred01[i], 0, -1))
+                    for i in range(pred01.shape[0])
+                ]
+                writer.add_scalar(
+                    "val/psnr_pred_pseudo_t01", float(np.mean(psnr_values)), self.step
+                )
         self.model.train()
+
+    def _assemble_batch(
+        self, *, return_info: bool = False
+    ) -> tuple[TrainingBatch, int] | tuple[TrainingBatch, int, list]:
+        """One training batch; the LAST ``rollout_count`` samples are rollouts.
+
+        Rollout samples put sampler-generated pseudo-averages on the INPUT side
+        only, conditioned on the nominal harvest level; their targets come
+        straight from :meth:`BatchFactory.rollout_pair_batch` -- real fresh
+        frames that never pass through the model (method doc S5, Q&A Q6).
+        """
+        if self._rollout_count == 0:
+            result = self.factory.sample_batch(return_info=return_info)
+            if return_info:
+                return result[0], 0, list(result[1])
+            return result, 0
+        parts_x: list[torch.Tensor] = []
+        parts_t: list[torch.Tensor] = []
+        parts_eps: list[torch.Tensor] = []
+        info: list = []
+        if self._real_count > 0:
+            result = self.factory.sample_batch(count=self._real_count, return_info=return_info)
+            real = result[0] if return_info else result
+            if return_info:
+                info.extend(result[1])
+            parts_x.append(real.x_t.to(self.device))
+            parts_t.append(real.t.to(self.device))
+            parts_eps.append(real.eps.to(self.device))
+        pair_result = self.factory.rollout_pair_batch(
+            count=self._rollout_count, return_info=return_info
+        )
+        pair = pair_result[0] if return_info else pair_result
+        if return_info:
+            info.extend(pair_result[1])
+        ema_for_rollout = self.ema if self.config.training.rollout.use_ema else None
+        with ema_parameters(self.model, ema_for_rollout):
+            states = harvest_rollout_states(
+                self.model,
+                pair.seed.to(self.device),
+                pair.stop_level,
+                num_steps=self.config.schedule.num_steps,
+            )
+        parts_x.append(states)
+        parts_t.append(pair.stop_level.to(device=self.device, dtype=torch.float32))
+        parts_eps.append(pair.target.to(self.device))
+        batch = TrainingBatch(
+            x_t=torch.cat(parts_x), t=torch.cat(parts_t), eps=torch.cat(parts_eps)
+        )
+        if return_info:
+            return batch, self._rollout_count, info
+        return batch, self._rollout_count
 
     def run(self) -> Path:
         training = self.config.training
         writer = SummaryWriter(log_dir=str(self.run_dir / "tb"))
         loss_by_t: dict[int, list[float]] = defaultdict(list)
+        loss_by_t_rollout: dict[int, list[float]] = defaultdict(list)
         window_started = time.time()
         stop_reason: str | None = None
         self.model.train()
@@ -249,7 +348,7 @@ class Trainer:
                 if self.stop_file.exists():
                     stop_reason = f"stop file present: {self.stop_file}"
                     break
-                batch = self.factory.sample_batch()
+                batch, rollout_count = self._assemble_batch()
                 x_t = batch.x_t.to(self.device)
                 t = batch.t.to(self.device)
                 eps = batch.eps.to(self.device)
@@ -267,14 +366,17 @@ class Trainer:
                 self.step += 1
 
                 detached = per_sample.detach().cpu()
-                for value, level in zip(detached.tolist(), batch.t.tolist()):
-                    loss_by_t[int(level)].append(value)
+                real_in_batch = len(detached) - rollout_count
+                for index, (value, level) in enumerate(zip(detached.tolist(), batch.t.tolist())):
+                    bucket = loss_by_t if index < real_in_batch else loss_by_t_rollout
+                    bucket[int(level)].append(value)
 
                 if self.step == 1 or self.step % training.log_every == 0:
                     elapsed = max(time.time() - window_started, 1e-9)
-                    steps_in_window = sum(len(v) for v in loss_by_t.values()) / max(
-                        training.batch_size, 1
+                    sample_count = sum(len(v) for v in loss_by_t.values()) + sum(
+                        len(v) for v in loss_by_t_rollout.values()
                     )
+                    steps_in_window = sample_count / max(training.batch_size, 1)
                     scalar_loss = float(loss.item())
                     writer.add_scalar("train/loss", scalar_loss, self.step)
                     writer.add_scalar(
@@ -286,6 +388,12 @@ class Trainer:
                             float(np.mean(values)),
                             self.step,
                         )
+                    for level, values in sorted(loss_by_t_rollout.items()):
+                        writer.add_scalar(
+                            f"train/loss_by_t_rollout/{level:02d}",
+                            float(np.mean(values)),
+                            self.step,
+                        )
                     logger.info(
                         "step %d | loss %.5f | %.1f steps/s",
                         self.step,
@@ -293,6 +401,7 @@ class Trainer:
                         steps_in_window / elapsed,
                     )
                     loss_by_t.clear()
+                    loss_by_t_rollout.clear()
                     window_started = time.time()
 
                 if self.step % training.val_every == 0 or self.step == training.max_steps:

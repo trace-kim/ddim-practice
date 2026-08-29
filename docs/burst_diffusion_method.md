@@ -296,12 +296,83 @@ one-shot from a single frame.) Mitigations, in increasing order of effort:
 prefer the `prediction` output; use fewer sampling steps (less compounding);
 **self-rollout finetuning** — continue training on the sampler's own
 intermediate states so the network sees its inference-time input distribution
-(the natural next experiment). Validity note: pseudo-averages would enter only
+(implemented; next subsection). Validity note: pseudo-averages enter only
 as *inputs*; targets remain real fresh frames, so by Theorem 1 the optimum for
 the new inputs is still $\mathbb{E}[x_0 \mid \cdot]$ and the real-noise
 grounding is untouched. Model outputs must never appear on the *target* side —
 that would be self-distillation, free to drift toward the model's own
 artifacts.
+
+### Self-rollout finetuning (implemented)
+
+The opt-in `training.rollout` stage replaces a configurable fraction (default
+0.5) of every batch with rollout pairs: run the deterministic sampler on a
+real seed frame $y_{\text{seed}}$ from $t = T$ down to a *stop level* $s$,
+take the pseudo-average state $x_s$ as the network **input** conditioned on
+$t = s$, and train against a **real fresh frame** $y_k$, $k \ne \text{seed}$,
+cropped from the same window. The remaining fraction of the batch stays
+ordinary real-average training, so the original competency keeps its gradient
+signal (augment, never replace).
+
+Three invariants, enforced by construction and by test:
+
+1. **Model outputs appear only on the input side.** The data layer
+   (`BatchFactory.rollout_pair_batch`) supplies seeds, targets, and stop
+   levels without ever touching a torch model; `rollout.py` turns seeds into
+   states and *returns only states*; the training loop pairs them. A test
+   poisons the network with a sentinel constant and asserts every assembled
+   target is still a bit-exact crop of a real cached frame. By Theorem 1
+   (whose proof never uses how the input was manufactured), the optimum on
+   pseudo-inputs is still $\mathbb{E}[x_0 \mid \text{input}]$.
+2. **The target excludes the seed.** This is required, not cosmetic: the
+   seed's noise $n_{\text{seed}}$ sits inside the pseudo-average with weight
+   $1/m(s)$, so $\mathbb{E}[y_{\text{seed}} \mid x_s] = \mathbb{E}[x_0 \mid x_s]
+   + \mathbb{E}[n_{\text{seed}} \mid x_s] \ne \mathbb{E}[x_0 \mid x_s]$ — a
+   partial return of the Theorem 2 degeneracy. An independent frame's noise
+   vanishes as usual.
+3. **`rollout.fraction: 0` (or omitting the block) is bit-identical to
+   baseline training** (equivalence test), and exact resume covers the rollout
+   path (the factory RNG stream, EMA, and model states are all restored).
+
+The open design choices, decided as follows:
+
+- **$t$-conditioning: the nominal sampler step**, not a matched noise level.
+  The finetuned model must serve the *unchanged* sampler, which queries at
+  the nominal $t$ — training with any other label would train a function the
+  sampler never calls. A "matched" $t$ is not even well-defined: the
+  pseudo-state's deviation from $x_0$ is $\sigma^2/m^2$ of real noise plus
+  *correlated* model error, which no real-average level reproduces. Under
+  nominal-$t$ conditioning the label simply acquires a second meaning on the
+  second input manifold — "$T - t$ sampler steps done" — and the two
+  manifolds are distinguishable by texture, so one network can serve both
+  (the real-input validation metrics guard the first meaning).
+- **Stop-level distribution: uniform over $\{1..T-1\}$** (antithetic-paired
+  $s \leftrightarrow T - s$ when `training.antithetic` is on). This is
+  exactly the visit distribution of the full inference schedule, which
+  queries each level once per run; $T$ is excluded because the state at $T$
+  is the raw real frame — already ordinary training. The whole rollout
+  sub-batch shares one batched trajectory, harvesting each sample's state in
+  passing at its own stop level (cost: $T - \min s$ extra no-grad forwards
+  per step).
+- **On-the-fly generation each step, not precomputed.** The state
+  distribution is a function of the current weights; a precomputed pool goes
+  stale exactly as fast as finetuning makes progress. This is DAgger's
+  lesson from imitation learning: train on the *current* policy's states,
+  with expert (here: real-measurement) labels. Cost is a ~2–3× step-time
+  increase at $T=15$, acceptable for a finetuning stage.
+- **EMA weights generate the rollouts** (`rollout.use_ema`, default on).
+  Inference samples with the EMA weights, so EMA states *are* the deployment
+  input distribution; using live weights would also couple the input
+  distribution to per-step optimizer jitter. The gradient step still updates
+  the live weights, and EMA tracks them as usual.
+- Rollouts use the full unit-step schedule (the default inference path and
+  the worst case for compounding); accelerated-schedule states are not
+  explicitly trained on in v1.
+
+During finetuning, `val/psnr_pred_pseudo_t01` tracks the probe-B readout
+(prediction quality at $t=1$ from the model's own full trajectory) next to
+the unchanged real-input metrics, so gap-closing and real-input regression
+are both visible live.
 
 ## 6. When the assumptions bend: bias and correlation
 

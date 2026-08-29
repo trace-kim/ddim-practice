@@ -100,8 +100,11 @@ Evaluation reports both.
    shot + read noise) for quantitative runs.
 4. **Train/inference gap.** At inference the running average mixes one real
    frame with predictions (residual real-noise variance `σ²/m²` vs the
-   `σ²/m` seen in training). Accepted for v1; the `prediction` output and
-   accelerated schedules (less compounding) are the practical mitigations.
+   `σ²/m` seen in training). Practical mitigations: the `prediction` output,
+   accelerated schedules (less compounding), and the opt-in
+   `training.rollout` **self-rollout finetuning** stage, which continues
+   training with the sampler's own pseudo-averages as inputs — targets stay
+   real fresh frames, which is what keeps it valid (method doc §5).
 5. **Never resize or color-convert noisy frames.** Resampling averages pixels
    (a hidden partial denoise) and correlates the noise; RGB→gray averages
    channels (≈ +3.5 dB hidden denoise). All content-scale and color changes
@@ -135,6 +138,11 @@ python -m burst_diffusion sample --checkpoint runs/burst_diffusion/bbbc038_p10/c
 python -m burst_diffusion evaluate --config configs/burst_diffusion/bbbc038_p10.yml `
   --checkpoint runs/burst_diffusion/bbbc038_p10/ckpt_latest.pt `
   --out runs/burst_diffusion/bbbc038_p10/eval
+
+# 6. (optional) Self-rollout finetuning: close the train/inference gap by
+#    continuing FROM the trained checkpoint with a rollout config (new run_dir)
+python -m burst_diffusion train --config configs/burst_diffusion/bbbc038_p10_rollout.yml `
+  --resume-from runs/burst_diffusion/bbbc038_p10/ckpt_latest.pt
 ```
 
 `evaluate` reports `single_frame`, `avg_of_n`, `one_shot` (single forward
