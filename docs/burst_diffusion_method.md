@@ -271,8 +271,18 @@ noise would be. Two predicted consequences:
 2. iterating cannot be assumed to beat the direct estimate
    $\varepsilon_\theta(y_1, T)$.
 
-**Empirically confirmed:** one-shot 40.2 dB vs iterative-prediction 34.0 dB
-(BBBC038); 35.4 vs 35.3 dB (MIIC). Mitigations, in increasing order of effort:
+**Empirically confirmed**, twice over. Across the BBBC038 validation set, the
+mean *first* prediction of the trajectory (= one-shot) scores 40.2 dB while
+the mean *last* prediction scores 34.0 dB (MIIC: 35.4 vs 35.3). And a
+controlled per-source probe isolates the cause: feeding the same network at
+$t=1$ a **real** 15-frame average yields a 42.8 dB prediction, while feeding
+it the sampler's own pseudo-average at the same $t$ yields 36.0 dB — same
+weights, same conditioning, 6.8 dB lost purely to the input distribution.
+(With real $m$-frame averages the prediction improves monotonically in $m$,
+36.2 → 42.8 dB — the posterior-mean family works; only the self-generated
+inputs are foreign. Practical corollary: if a few real frames *are* acquired,
+averaging them and querying at the matching $t$ is supported and better than
+one-shot from a single frame.) Mitigations, in increasing order of effort:
 prefer the `prediction` output; use fewer sampling steps (less compounding);
 **self-rollout finetuning** — continue training on the sampler's own
 intermediate states so the network sees its inference-time input distribution
