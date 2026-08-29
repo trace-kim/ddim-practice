@@ -105,6 +105,9 @@ Evaluation reports both.
    `training.rollout` **self-rollout finetuning** stage, which continues
    training with the sampler's own pseudo-averages as inputs — targets stay
    real fresh frames, which is what keeps it valid (method doc §5).
+   Measured: after a 10k-step finetune, `iter_prediction >= one_shot` on
+   both reference datasets (report §8) and the iterated prediction is the
+   best single-frame output.
 5. **Never resize or color-convert noisy frames.** Resampling averages pixels
    (a hidden partial denoise) and correlates the noise; RGB→gray averages
    channels (≈ +3.5 dB hidden denoise). All content-scale and color changes

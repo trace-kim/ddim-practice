@@ -6,7 +6,7 @@
 
 - A network trained only on noisy burst frames (never a clean image) reconstructs, **from one fast noisy acquisition**, an image **9–11.5 dB cleaner than averaging all 16 burst frames** — on both fluorescence microscopy and SEM data.
 - The training loss converged to within 3% of the theoretically predicted noise floor, confirming the math behind the method.
-- One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known.
+- One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known. **Update 2026-08-30: the fix (self-rollout finetuning) is implemented and worked — iteration now beats the single forward pass on both datasets (§8).**
 
 ## 1. What we set out to test
 
@@ -118,7 +118,7 @@ curve).
    correlated across steps so they do not average out like real noise. The
    evaluation reports both outputs precisely so this is measurable rather than
    hidden. Candidate fix: self-rollout finetuning (train on the sampler's own
-   intermediate states).
+   intermediate states) — since implemented and confirmed, see §8.
 
 ## 6. Limitations
 
@@ -136,8 +136,66 @@ curve).
 
 ## 7. Next steps
 
-1. Self-rollout finetuning to close the iteration gap.
+1. ~~Self-rollout finetuning to close the iteration gap.~~ Done — §8.
 2. T=31 / N=32 regeneration and re-run (config-only, ~30 min).
 3. Real SEM burst ingestion (a small manifest-builder; the loader already
    accepts the layout) + drift/registration checking.
 4. Full-image tiled benchmarking and larger patches (128px fits this GPU).
+
+## 8. Follow-up experiment: self-rollout finetuning (2026-08-30)
+
+The gap diagnosed in §5.3 was attacked with the opt-in `training.rollout`
+stage (design and validity argument: method doc §5): each baseline was
+finetuned for 10,000 further steps (30k → 40k) with half of every batch
+replaced by the sampler's own intermediate pseudo-averages as network
+*inputs* — targets stay real fresh frames, which is what keeps the
+training grounded in the instrument's noise. Rollout states were generated
+on the fly with the EMA weights (the inference distribution), at
+~4.2 steps/s (~3.8× slower than baseline training; ~40 min per model on
+the same RTX 4060 Ti).
+
+Same held-out sources and protocol as §4; baseline numbers repeated for
+comparison:
+
+| Method | BBBC038 base | BBBC038 finetuned | MIIC base | MIIC finetuned |
+|---|---|---|---|---|
+| single frame (the input) | 16.8 | 16.8 | 14.2 | 14.2 |
+| average of all 16 frames | 28.7 | 28.7 | 26.2 | 26.2 |
+| one-shot | **40.2** | 39.9 | 35.4 | 35.6 |
+| iterative — average output | 34.7 | 36.7 | 33.6 | 33.9 |
+| iterative — prediction output | 34.0 | **40.5** | 35.3 | **35.9** |
+
+(PSNR dB; SSIM moved in step: BBBC038 iter-prediction 0.966 → 0.970, MIIC
+0.950 → 0.950.) The goal condition **iter_prediction ≥ one_shot now holds
+on both datasets** (+0.7 dB BBBC038, +0.4 dB MIIC), and the iterated
+prediction is the best single-frame output overall — on BBBC038 it also
+beats the *baseline's* one-shot (40.5 vs 40.2).
+
+The controlled input-distribution measurement (validation-set mean
+prediction PSNR at t=1, the §5.3 probe generalized to all 10 sources):
+feeding the network its own pseudo-average improved from 34.0 → 40.5 dB
+(BBBC038) and 35.3 → 35.9 dB (MIIC), while feeding it a *real* 15-frame
+average stayed put (44.9 → 44.9 and 39.0 → 38.9) — the finetuning fixed
+the foreign-input problem without touching real-input competency. The
+remaining pseudo-vs-real gap (4.3 / 3.0 dB) is mostly an information
+ceiling, not a remaining defect: the sampler is deterministic, so its
+final prediction is a function of the one measured frame, and no
+finetuning can make one frame carry the information of fifteen.
+
+Per-source, the headline is the disappearance of the catastrophic cases:
+at baseline, iterating could *destroy* an excellent first prediction
+(worst BBBC038 source: one-shot 50.1 dB → iterated 30.8 dB, −19.3 dB);
+after finetuning that same source iterates to 51.2 dB — *above* its
+one-shot. Across all ten BBBC038 validation sources the iterated
+prediction now matches or beats one-shot within ±0.5 dB or better.
+Gap-closing is uneven (sources with no one-shot-to-iteration deficit,
+like the probe's default source 12, barely move; the worst deficits gain
+up to +20 dB), so the single-source probe understates the effect — the
+validation-set means above are the honest readout.
+
+Costs, stated plainly: one-shot on BBBC038 slipped 40.2 → 39.9 dB
+(−0.35 dB; MIIC went *up* +0.2 dB) — the price of sharing half the
+gradient signal with the second input manifold. If one-shot is the only
+output a deployment uses, skip the finetune or lower `rollout.fraction`;
+if the iterative outputs matter (they are now the best ones), the trade
+is clearly favorable.

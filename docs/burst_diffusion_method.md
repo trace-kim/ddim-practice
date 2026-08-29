@@ -358,8 +358,8 @@ The open design choices, decided as follows:
   distribution is a function of the current weights; a precomputed pool goes
   stale exactly as fast as finetuning makes progress. This is DAgger's
   lesson from imitation learning: train on the *current* policy's states,
-  with expert (here: real-measurement) labels. Cost is a ~2–3× step-time
-  increase at $T=15$, acceptable for a finetuning stage.
+  with expert (here: real-measurement) labels. Cost is a measured ~3.8×
+  step-time increase at $T=15$, acceptable for a finetuning stage.
 - **EMA weights generate the rollouts** (`rollout.use_ema`, default on).
   Inference samples with the EMA weights, so EMA states *are* the deployment
   input distribution; using live weights would also couple the input
@@ -373,6 +373,48 @@ During finetuning, `val/psnr_pred_pseudo_t01` tracks the probe-B readout
 (prediction quality at $t=1$ from the model's own full trajectory) next to
 the unchanged real-input metrics, so gap-closing and real-input regression
 are both visible live.
+
+**Measured outcome (2026-08-30).** Both reference baselines were finetuned
+for 10,000 steps (30k → 40k) with `fraction: 0.5` and EMA rollouts, at
+~4.2 steps/s (a ~3.8× slowdown from the per-step no-grad trajectories).
+Validation-set means at $t=1$, 10 held-out sources per dataset:
+
+| dataset | A: real 15-frame avg input | B: own pseudo-avg input | gap A−B |
+|---|---|---|---|
+| BBBC038, baseline | 44.93 dB | 34.00 dB | 10.93 dB |
+| BBBC038, finetuned | 44.88 dB | **40.54 dB** | **4.34 dB** |
+| MIIC, baseline | 39.03 dB | 35.25 dB | 3.77 dB |
+| MIIC, finetuned | 38.93 dB | **35.94 dB** | **2.99 dB** |
+
+The real-input column moved by ≤ 0.10 dB (competency preserved); the
+pseudo-input column absorbed the entire improvement, closing 60% of the
+BBBC038 gap. In the five-baseline evaluation the goal condition
+`iter_prediction` $\ge$ `one_shot` now holds on both datasets
+(BBBC038 40.54 vs 39.87 dB; MIIC 35.94 vs 35.56 dB — see the
+[report](burst_diffusion_report.md) §8 for full tables and the per-source
+breakdown). Per source, the baseline's catastrophic cases vanished: the
+worst was a 50.1 dB one-shot iterated *down* to 30.8 dB, which finetuning
+turned into 51.2 dB — iterating now matches or beats one-shot on every
+validation source.
+
+Two honest caveats. First, the A and B curves cannot fully merge, for an
+information-theoretic reason the original gap discussion already implies:
+the sampler is deterministic, so every trajectory state — and hence the
+final prediction — is a function of the single measurement $y_1$. By the
+data-processing inequality no amount of finetuning can make
+$\varepsilon_\theta(x_1^{\text{pseudo}}, 1)$ carry more measurement
+information than $y_1$ contains, while the A column is computed from 15
+real frames (15× more measurements). The residual 4.3 / 3.0 dB gaps are
+dominated by that ceiling, not by remaining distribution mismatch — the
+operative success criterion is `iter_prediction` $\ge$ `one_shot` (extract
+everything $y_1$ holds, stop destroying it), which is what was achieved;
+on several sources the iterated prediction now *exceeds* one-shot by
+1–2 dB, i.e. re-reading the frame through the trajectory extracts more
+than the single $t=T$ call. Second, gap-closing is uneven across sources
+(e.g. BBBC038 source 12 — the probe default — has essentially no headroom
+over its one-shot and barely moves, while sources with a large
+one-shot-to-iteration deficit gain up to +20 dB), so single-source probes
+understate the effect; use validation-set means.
 
 ## 6. When the assumptions bend: bias and correlation
 

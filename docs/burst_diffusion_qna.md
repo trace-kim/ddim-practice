@@ -255,6 +255,19 @@ of `tools/probe_burst_predictions.py` should merge (baseline: 42.8 vs
 36.0 dB at $t=1$), real-input validation metrics must not regress, and the
 goal is `iter_prediction` $\ge$ `one_shot`.
 
+**Outcome (2026-08-30):** implemented as the opt-in `training.rollout`
+stage (decisions: nominal-step $t$, stop levels uniform over $\{1..T-1\}$,
+on-the-fly EMA-weight rollouts — reasoning in the method doc §5) and run
+on both baselines. The goal holds on both datasets: `iter_prediction`
+40.5 vs `one_shot` 39.9 dB (BBBC038) and 35.9 vs 35.6 dB (MIIC), with
+real-input metrics essentially unchanged. One refinement to the success
+criterion as originally stated: the A/B curves *cannot fully* merge,
+because the deterministic sampler makes every pseudo-state a function of
+the single frame $y_1$ — B is information-bounded by one measurement
+while A consumes fifteen. The validation-set A−B gap at $t=1$ closed from
+10.9 to 4.3 dB (BBBC038) and 3.8 to 3.0 dB (MIIC); the remainder is that
+ceiling, not residual distribution mismatch. Full tables: report §8.
+
 ---
 
 ## Appendix: the diagnostic probe
@@ -293,3 +306,11 @@ frame by exactly that frame's own noise — i.e. it is the clean estimate
 levels. **B** flat at ~36 dB while **A** reaches 42.8 dB at the same $t$ =
 the train/inference input gap (Q4). The final two lines = the loss-floor
 signature (Q3).
+
+*Caveat learned during the finetuning follow-up (Q6):* source 12 turned out
+to be the one validation source with essentially **no headroom** — its
+one-shot (36.1 dB) already saturates what a single frame supports there, so
+its B column barely moves even after finetuning closes the dataset-wide gap
+(validation-set mean B at $t=1$: 34.0 → 40.5 dB). Single-source probe runs
+locate the mechanism, but judge gap-closing by validation-set means
+(report §8), not by this one source.

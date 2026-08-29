@@ -154,8 +154,9 @@ point of resuming into the finetune config.) Watch:
 - `train/loss_by_t_rollout/*` — per-level losses of the rollout half of each
   batch (the real half stays under `train/loss_by_t/*`).
 
-Steps are ~2–3× slower than baseline (each batch runs a no-grad sampler
-trajectory to generate its rollout states).
+Steps are ~4× slower than baseline (measured 4.2 vs 16 steps/s on the
+reference GPU — each batch runs a no-grad sampler trajectory to generate
+its rollout states).
 
 ## 4. Denoise a measurement
 
