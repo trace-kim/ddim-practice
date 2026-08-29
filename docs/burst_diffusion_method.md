@@ -136,9 +136,19 @@ copy machine.
 inside $x_t$, but the mixture is weighted:
 $\mathbb{E}[\varepsilon\mid x_t] = \bigl(x_t - \sqrt{\bar\alpha_t}\,\mathbb{E}[x_0\mid x_t]\bigr)/\sqrt{1-\bar\alpha_t}$,
 which is non-trivial exactly because recovering it requires the learned prior
-over $x_0$. An equal-weight average destroys that asymmetry. This is why
-`target_mode: fresh` is the default and `included` exists only as a
-documented-degenerate ablation (it warns at construction).
+over $x_0$. An equal-weight average destroys that asymmetry.
+
+The mirror statement also holds: had DDPM been trained against a *fresh*
+Gaussian $\varepsilon'$ independent of $x_t$, the optimum would be
+$\mathbb{E}[\varepsilon' \mid x_t] = 0$ — the network would collapse to the
+zero array. Each framework is forced onto the opposite target choice by what
+its $\varepsilon$ *contains*: DDPM's noise is signal-free and zero-mean
+(fresh $\Rightarrow$ zero-array collapse, so it must predict the included
+realization), while a burst frame carries $x_0$ inside it (included
+$\Rightarrow$ identity collapse, fresh $\Rightarrow$ collapse onto the clean
+image — the useful one). This is why `target_mode: fresh` is the default and
+`included` exists only as a documented-degenerate ablation (it warns at
+construction).
 
 ### Loss decomposition and the loss floor
 
@@ -286,7 +296,12 @@ one-shot from a single frame.) Mitigations, in increasing order of effort:
 prefer the `prediction` output; use fewer sampling steps (less compounding);
 **self-rollout finetuning** — continue training on the sampler's own
 intermediate states so the network sees its inference-time input distribution
-(the natural next experiment).
+(the natural next experiment). Validity note: pseudo-averages would enter only
+as *inputs*; targets remain real fresh frames, so by Theorem 1 the optimum for
+the new inputs is still $\mathbb{E}[x_0 \mid \cdot]$ and the real-noise
+grounding is untouched. Model outputs must never appear on the *target* side —
+that would be self-distillation, free to drift toward the model's own
+artifacts.
 
 ## 6. When the assumptions bend: bias and correlation
 
