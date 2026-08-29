@@ -13,8 +13,10 @@ intra-repo import is `noising_pipeline`, the synthetic-data tool.
 (what was run and what came out) ·
 [user guide](../docs/burst_diffusion_guide.md) (step-by-step usage, config
 reference, troubleshooting) ·
-[method & derivations](../docs/burst_diffusion_method.md) (the full math).
-This README is the condensed version of all three.
+[method & derivations](../docs/burst_diffusion_method.md) (the full math) ·
+[Q&A](../docs/burst_diffusion_qna.md) (design-review questions with measured
+answers: why one-shot denoises, the DDPM symmetry, why iteration lagged,
+self-rollout validity). This README is the condensed version of them all.
 
 ## Method
 
