@@ -1,0 +1,39 @@
+# CPU smoke test for burst_diffusion: tiny model, tiny burst dataset, seconds
+# per run. Generate the matching dataset with:
+#   python -m burst_diffusion generate --source-dir data/BBBC038v1 `
+#     --output-dir data/BBBC038-burst-smoke --num-sources 6 --replicas 6 `
+#     --noise-type poisson --peak 10 --margin 0.15 --max-side 64 --overwrite
+data:
+  dataset_dir: data/BBBC038-burst-smoke
+  image_size: 32
+  channels: 1
+  val_fraction: 0.2
+  split_seed: 2019
+schedule:
+  num_steps: 3
+  target_mode: fresh
+model:
+  ch: 32
+  ch_mult: [1, 2]
+  num_res_blocks: 1
+  attn_resolutions: []
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/smoke
+  batch_size: 4
+  max_steps: 30
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: cpu
+  log_every: 5
+  val_every: 10
+  val_images: 2
+  checkpoint_every: 10
+sampling:
+  output_mode: both
+  num_sample_steps: null

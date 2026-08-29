@@ -1,0 +1,42 @@
+# SEM run: MIIC integrated-circuit SEM sources (NTU MIIC dataset,
+# doi:10.21979/N9/WBLTFI, CC BY-NC 4.0), Poisson noise at effective peak 10.
+# Same recipe as bbbc038_p10.yml; only the dataset differs. The clean-source
+# directory is machine-specific and appears only in the generation command:
+#   python -m burst_diffusion generate `
+#     --source-dir E:/PythonProjects/SEMImageAI/data/datasets/paired_miic_v0/train/target_sem `
+#     --output-dir data/MIIC-burst-p10 --num-sources 96 --replicas 16 `
+#     --noise-type poisson --peak 10 --margin 0.15 --max-side 512 --overwrite
+data:
+  dataset_dir: data/MIIC-burst-p10
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  split_seed: 2019
+schedule:
+  num_steps: 15
+  target_mode: fresh
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/miic_p10
+  batch_size: 8
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000
+sampling:
+  output_mode: both
+  num_sample_steps: null

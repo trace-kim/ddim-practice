@@ -1,0 +1,43 @@
+# First real burst_diffusion run: BBBC038 microscopy sources, Poisson noise at
+# effective peak 10 (very noisy, ~17 dB single-frame PSNR). 64px patches,
+# 8.95M-param U-Net. batch_size 8 keeps Windows commit-charge usage low --
+# WDDM backs every CUDA allocation with system commit, and this machine often
+# runs commit-heavy apps (VMs, Docker); batch 16 hit allocation failures.
+# Generate the dataset with:
+#   python -m burst_diffusion generate --source-dir data/BBBC038v1 `
+#     --output-dir data/BBBC038-burst-p10 --num-sources 96 --replicas 16 `
+#     --noise-type poisson --peak 10 --margin 0.15 --max-side 512 --overwrite
+data:
+  dataset_dir: data/BBBC038-burst-p10
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  split_seed: 2019
+schedule:
+  num_steps: 15
+  target_mode: fresh
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/bbbc038_p10
+  batch_size: 8
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000
+sampling:
+  output_mode: both
+  num_sample_steps: null
