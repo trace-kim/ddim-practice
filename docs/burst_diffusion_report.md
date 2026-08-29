@@ -193,9 +193,37 @@ like the probe's default source 12, barely move; the worst deficits gain
 up to +20 dB), so the single-source probe understates the effect — the
 validation-set means above are the honest readout.
 
-Costs, stated plainly: one-shot on BBBC038 slipped 40.2 → 39.9 dB
-(−0.35 dB; MIIC went *up* +0.2 dB) — the price of sharing half the
-gradient signal with the second input manifold. If one-shot is the only
-output a deployment uses, skip the finetune or lower `rollout.fraction`;
-if the iterative outputs matter (they are now the best ones), the trade
-is clearly favorable.
+**Control: is it the rollout, or just 10k more steps?** Because the
+finetuned models received 10,000 *additional* gradient steps, a plain
+continuation of each baseline to 40k (identical config, no `rollout`
+block, same resume) was trained as the equal-compute control:
+
+| iter_prediction (PSNR) | BBBC038 | MIIC |
+|---|---|---|
+| baseline, 30k | 34.00 | 35.25 |
+| control: plain continuation, 40k | 33.81 | 35.27 |
+| rollout finetune, 40k | **40.54** | **35.94** |
+
+Plain continuation moves iteration by −0.19 / +0.02 dB — nothing. Paired
+per-source against the control, the rollout arm gains +6.73 dB (10/10
+sources, t = 3.2) on BBBC038 and +0.67 dB (8/10, t = 3.6) on MIIC: the
+improvement is attributable to the rollout mechanism, not to extra
+training. (Evaluation itself is deterministic — re-running the baseline
+eval reproduces its numbers exactly — and no checkpoint selection was
+involved anywhere: every arm is its config-fixed final step.)
+
+Costs and effect sizes, stated plainly: one-shot on BBBC038 slipped
+40.2 → 39.9 dB — the control held 40.24, so the −0.35 dB (per-source
+−0.37, 1/10 positive, t = −2.5) is genuinely the price of sharing half
+the gradient signal with the second input manifold (on MIIC the control
+shows no one-shot effect at all, t = 0.6). And the *margin* of the
+finetuned iteration over the finetuned one-shot is small — +0.67 dB
+(8/10 sources, t = 2.3) on BBBC038, +0.37 dB (9/10, t = 3.2) on MIIC —
+necessarily so: both outputs are deterministic functions of the same
+single frame, so iteration can only read that frame somewhat better,
+never add measurements. The large, unambiguous effect is the repair of
+iteration itself (+6.5 dB, 10/10 sources on BBBC038); the win over
+one-shot is consistent but modest. If one-shot is the only output a
+deployment uses, skip the finetune or lower `rollout.fraction`; if the
+iterative outputs matter (they are now the best ones), the trade is
+clearly favorable.

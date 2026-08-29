@@ -260,7 +260,10 @@ stage (decisions: nominal-step $t$, stop levels uniform over $\{1..T-1\}$,
 on-the-fly EMA-weight rollouts — reasoning in the method doc §5) and run
 on both baselines. The goal holds on both datasets: `iter_prediction`
 40.5 vs `one_shot` 39.9 dB (BBBC038) and 35.9 vs 35.6 dB (MIIC), with
-real-input metrics essentially unchanged. One refinement to the success
+real-input metrics essentially unchanged. An equal-compute control (each
+baseline plainly continued for the same 10k extra steps, no rollout)
+leaves `iter_prediction` at its baseline value, so the change is
+attributable to the rollout mechanism, not to more training. One refinement to the success
 criterion as originally stated: the A/B curves *cannot fully* merge,
 because the deterministic sampler makes every pseudo-state a function of
 the single frame $y_1$ — B is information-bounded by one measurement

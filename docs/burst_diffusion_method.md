@@ -392,7 +392,10 @@ BBBC038 gap. In the five-baseline evaluation the goal condition
 `iter_prediction` $\ge$ `one_shot` now holds on both datasets
 (BBBC038 40.54 vs 39.87 dB; MIIC 35.94 vs 35.56 dB — see the
 [report](burst_diffusion_report.md) §8 for full tables and the per-source
-breakdown). Per source, the baseline's catastrophic cases vanished: the
+breakdown). An equal-compute control — each baseline plainly continued to
+40k steps with no rollout — leaves `iter_prediction` unchanged
+(34.00 → 33.81 / 35.25 → 35.27 dB), attributing the improvement to the
+rollout mechanism rather than to the extra training (report §8). Per source, the baseline's catastrophic cases vanished: the
 worst was a 50.1 dB one-shot iterated *down* to 30.8 dB, which finetuning
 turned into 51.2 dB — iterating now matches or beats one-shot on every
 validation source.
