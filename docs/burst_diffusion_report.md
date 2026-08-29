@@ -83,6 +83,11 @@ Everything below `avg_of_n` uses **only one noisy frame** as input:
 | model, iterative sampler — average output | 34.7 dB / 0.90 | 33.6 dB / 0.87 |
 | model, iterative sampler — prediction output | 34.0 dB / 0.97 | 35.3 dB / 0.95 |
 
+("One-shot" = the network evaluated once on the raw noisy frame at the highest
+noise level — no iterative sampling. It is also, exactly, the first step of
+the iterative sampler; the iterative rows differ only in continuing from
+there. See the method doc, §4 "One-shot inference".)
+
 Convergence: the validation PSNR of the model's prediction (from one frame)
 rose from ~29 dB after 1,000 steps to 40.2 dB (BBBC038) / 35.6 dB (MIIC) at
 30,000 steps.

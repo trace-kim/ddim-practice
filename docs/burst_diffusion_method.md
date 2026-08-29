@@ -68,14 +68,14 @@ $$\mathcal{L}(\theta) \;=\; \mathbb{E}\,\bigl\lVert \varepsilon_\theta(x_t, t) -
 
 The choice of $K$ is the load-bearing design decision. Recall the standard
 $L^2$ fact: over all measurable $f$, $\mathbb{E}\lVert f(X) - Y\rVert^2$ is
-minimized by $f^\*(x) = \mathbb{E}[Y \mid X = x]$.
+minimized by $f^\ast(x) = \mathbb{E}[Y \mid X = x]$.
 
 ### Theorem 1 (fresh target ⇒ posterior-mean denoiser)
 
 **If $K \notin S$** ("fresh": the target frame is excluded from the average),
 the minimizer of $\mathcal{L}$ is
 
-$$\varepsilon^\*(\bar y, t) \;=\; \mathbb{E}\bigl[y_K \mid x_t = \bar y\bigr] \;=\; \mathbb{E}\bigl[x_0 \mid x_t = \bar y\bigr],$$
+$$\varepsilon^\ast(\bar y, t) \;=\; \mathbb{E}\bigl[y_K \mid x_t = \bar y\bigr] \;=\; \mathbb{E}\bigl[x_0 \mid x_t = \bar y\bigr],$$
 
 the minimum-MSE estimate of the **clean image** from an $m(t)$-frame average.
 
@@ -86,17 +86,41 @@ property and (A1)
 
 $$\mathbb{E}[n_K \mid x_t] \;=\; \mathbb{E}\bigl[\,\mathbb{E}[n_K \mid x_0, \{n_j\}_{j\in S}]\;\big|\; x_t\bigr] \;=\; \mathbb{E}\bigl[\,\mathbb{E}[n_K \mid x_0]\;\big|\;x_t\bigr] \;=\; 0. \qquad\blacksquare$$
 
-This is the Noise2Noise argument (Lehtinen et al., 2018) extended across a
-schedule of averaging levels: **training toward noisy targets converges to the
-clean-image estimator, so no clean image is ever needed for training.** The
-level-$t$ conditioning makes it a family of denoisers, one per input noise
-level $\sigma^2/m(t)$. Because the cleanest level averages $T$ frames and the
-fresh target must lie outside that subset, $N \ge T+1$.
+**Noise2Noise in one paragraph.** Noise2Noise (Lehtinen et al., 2018) is the
+observation that an image-restoration network can be trained with *corrupted
+targets* instead of clean ones. A training pair is two independent noisy
+observations of the same scene, $(y^{\text{in}}, y^{\text{tgt}})$. Because the
+$L^2$-optimal predictor is the conditional mean, and independent zero-mean
+noise vanishes inside a conditional mean —
+$\mathbb{E}[y^{\text{tgt}} \mid y^{\text{in}}] = \mathbb{E}[x_0 \mid y^{\text{in}}]$
+— the network converges to the *same function* it would have learned from
+clean targets; the noisy target is an unbiased, merely higher-variance,
+stand-in. Gradient noise grows, the optimum does not move. Intuitively: the
+network cannot learn to reproduce the target's noise, because that noise is
+unpredictable from an independent observation — so the best it can do is
+output the predictable part, the clean image. (The loss must match the noise
+statistics: $L^2$ for zero-mean noise; a median-seeking $L^1$ for impulse
+noise — which is exactly why salt-and-pepper breaks the MSE framework here,
+§6.)
+
+Theorem 1 is this argument, and the burst structure extends it in three ways:
+(i) the **input side is a partial average**, so one burst yields training
+pairs at $T$ different input-noise levels ($\sigma^2/m(t)$, $m = 1..T$)
+instead of Noise2Noise's single fixed level; (ii) the network is
+**$t$-conditioned**, one model spanning the whole schedule rather than one
+model per level; (iii) a **diffusion-style sampler** (§4) is wrapped around
+the learned family. The `fresh` requirement $K \notin S$ *is* Noise2Noise's
+independence condition — input and target must not share noise realizations —
+and Theorem 2 shows exactly what happens in the averaging setting when it is
+violated. Practically: **training toward noisy targets converges to the
+clean-image estimator, so no clean image is ever needed for training.**
+Because the cleanest level averages $T$ frames and the fresh target must lie
+outside that subset, $N \ge T+1$.
 
 ### Theorem 2 (included target ⇒ identity; the degenerate case)
 
 **If $K$ is drawn uniformly from $S$** ("included"), the minimizer is the
-identity map: $\varepsilon^\*(\bar y, t) = \bar y$.
+identity map: $\varepsilon^\ast(\bar y, t) = \bar y$.
 
 *Proof.* $K$ is independent of the frames given $S$, so
 
@@ -121,9 +145,9 @@ documented-degenerate ablation (it warns at construction).
 For any $\varepsilon_\theta$, orthogonality of the conditional expectation
 gives
 
-$$\mathbb{E}\lVert \varepsilon_\theta - y_K\rVert^2 \;=\; \underbrace{\mathbb{E}\lVert \varepsilon_\theta - \varepsilon^\*\rVert^2}_{\text{estimation error} \,\to\, 0} \;+\; \underbrace{\mathbb{E}\lVert \varepsilon^\* - y_K\rVert^2}_{\text{irreducible}} .$$
+$$\mathbb{E}\lVert \varepsilon_\theta - y_K\rVert^2 \;=\; \underbrace{\mathbb{E}\lVert \varepsilon_\theta - \varepsilon^\ast\rVert^2}_{\text{estimation error} \,\to\, 0} \;+\; \underbrace{\mathbb{E}\lVert \varepsilon^\ast - y_K\rVert^2}_{\text{irreducible}} .$$
 
-With a fresh target, $y_K - \varepsilon^\* = (x_0 - \mathbb{E}[x_0\mid x_t]) + n_K$,
+With a fresh target, $y_K - \varepsilon^\ast = (x_0 - \mathbb{E}[x_0\mid x_t]) + n_K$,
 and the cross term vanishes ($\mathbb{E}[n_K \mid x_0, x_t] = 0$), so per pixel
 
 $$\text{irreducible} \;=\; \mathbb{E}\bigl[\operatorname{Var}(x_0 \mid x_t)\bigr] \;+\; \sigma^2 .$$
@@ -191,6 +215,33 @@ give a coarse-to-fine refinement. Two outputs are returned:
 - $x_0^{\text{avg}}$ — the running average above (spec-faithful);
 - $x_0^{\text{pred}} = \hat\varepsilon_1 \approx \mathbb{E}[x_0 \mid x_1]$ —
   the final prediction, theoretically the cleanest estimate.
+
+### One-shot inference (the "single forward pass")
+
+Throughout the report, **one-shot** means evaluating the trained network
+exactly once on the raw measurement at the noisiest level, with no iteration:
+
+$$x_0^{\text{one-shot}} \;=\; \varepsilon_\theta(y_1,\, T).$$
+
+That a *noise predictor* used once yields a *denoised image* is a direct
+consequence of Theorem 1: the network was trained to predict a fresh frame,
+whose MSE-optimal value is $\mathbb{E}[x_0 \mid y_1]$ — the minimum-MSE clean
+estimate from a single frame. In other words, one-shot is a $t$-conditioned
+Noise2Noise denoiser applied at $t = T$. This differs sharply from DDPM, where
+a single high-$t$ evaluation gives a poor $x_0$ estimate (recovering
+$\hat x_0 = (x_t - \sqrt{1-\bar\alpha_t}\,\hat\varepsilon)/\sqrt{\bar\alpha_t}$
+divides by a tiny $\sqrt{\bar\alpha_t}$, amplifying error) and iteration is
+essential; here the signal is never attenuated, so the first prediction is
+already the full-strength estimate.
+
+One-shot is not a separate mechanism: it is the iterative sampler's *first*
+network call. Equivalently, it is the `prediction` output of the sampler run
+with the length-one schedule $[T]$ — which is exactly how `evaluate` computes
+it. Iteration differs only in what happens afterwards: the prediction is
+folded into the running average (weight $1/2$, then $1/3$, ...) and the
+network is re-queried at lower $t$. One-shot costs one network evaluation
+instead of $T$; whether the extra $T-1$ evaluations help is an empirical
+question — in the reference experiment they did not (§5).
 
 ### Retained-noise bound for the average output
 
