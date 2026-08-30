@@ -424,10 +424,11 @@ unique contents split by file index. Reproducing its 945/105 split exactly
 duplicate behind **105 of 105** validation files — all 76 distinct validation
 contents also occur in training. The upstream corpus's own nominal `val/` and
 `test/` directories overlap its `train/` completely as well (100/100 and
-92/92 contents). That run stands as a
-workflow demonstration only; its validation loss is not evidence of
-generalization. It was never a denoising experiment (unconditional DDPM,
-Gaussian-noise prediction), so no denoising claim rests on it.
+92/92 contents). That run stands as a workflow demonstration only; its
+validation loss is not evidence of generalization. It was never a denoising
+experiment in the first place — it is an unconditional DDPM trained to predict
+the Gaussian noise it added (`functions/losses.py`), so no denoising claim in
+this report rests on it.
 
 **Fixed in code, with regression tests:**
 
