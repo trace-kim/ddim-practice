@@ -297,3 +297,42 @@ def repeatability(
             f"pixel sigma {pixel_text} | CD 3sigma {cd_text} | shift sigma {shift_text}"
         )
     typer.echo(f"results written to {Path(out) / 'repeatability.json'}")
+
+
+@app.command()
+def provenance(
+    config: Path = typer.Option(..., help="YAML config path of the run to record."),
+    checkpoint: Optional[Path] = typer.Option(
+        None, help="Checkpoint to fingerprint (default: <run_dir>/ckpt_latest.pt)."
+    ),
+    command: Optional[str] = typer.Option(
+        None, help="The exact invocation that produced the run, for the record."
+    ),
+) -> None:
+    """Write provenance.json (code, dataset, environment, checkpoint) into a run dir."""
+    from .provenance import record_run
+
+    path = record_run(config, checkpoint=checkpoint, command=command)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    git = record["git"]
+    dataset = record["dataset"]
+    if git.get("available"):
+        state = "dirty" if git["dirty"] else "clean"
+        typer.echo(f"git      : {git['commit'][:12]} ({git['branch']}, {state})")
+    typer.echo(
+        f"dataset  : {dataset['sources']} sources, "
+        f"{dataset['distinct_contents']} distinct contents, "
+        f"digest {dataset['content_digest_sha256'][:12]}"
+    )
+    typer.echo(
+        "split    : "
+        f"train {len(dataset['split']['train'])} / "
+        f"val {len(dataset['split']['val'])} / "
+        f"test {len(dataset['split']['test'])}"
+    )
+    if record["checkpoint"] is not None:
+        typer.echo(
+            f"checkpoint: step {record['checkpoint']['step']}, "
+            f"sha256 {record['checkpoint']['sha256'][:12]}"
+        )
+    typer.echo(f"written to {path}")
