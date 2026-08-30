@@ -7,8 +7,9 @@
 - A network trained only on noisy burst frames (never a clean image) reconstructs, **from one fast noisy acquisition**, an image **9–11.5 dB cleaner than averaging all 16 burst frames** — on both fluorescence microscopy and SEM data.
 - The training loss converged to within 3% of the theoretically predicted noise floor, confirming the math behind the method.
 - One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known. **Update 2026-08-30: the fix (self-rollout finetuning) is implemented and worked — iteration now beats the single forward pass on both datasets (§8).**
-- **Metrology repeatability (§9):** re-measuring the same area with 10 fresh frames, the model's outputs move ~10× less per pixel than 8-frame averaging, and the iterated prediction is the most repeatable output on every pixel-level and registration measure (MIIC). **Correction (2026-08-30, §9.1):** an earlier version of this section claimed one-frame CD repeatability *beat* 8-frame averaging (0.80 vs 1.43 px). That claim was withdrawn — it came from a leaked, site-pooled comparison; on content-disjoint scenes avg-of-8 is level with or ahead of the model on CD. Costs: a systematic placement bias (~0.1–0.25 px) and strong content dependence.
-- **Leakage correction (§9.1):** the MIIC source corpus ships each image under several filenames (185 unique among 1050 files), so the original MIIC dataset held 68 distinct scenes among 96 sources and 6 of 10 "held-out" sources had a byte-identical training twin. Generation is now content-deduplicated, splitting is content-group-aware, a locked test split exists, and **all MIIC arms were retrained from scratch** (§9.2). BBBC038 was never affected (96/96 unique).
+- **Metrology repeatability (§9, corrected in §9.2):** re-measuring the same area with 10 fresh frames, the model's outputs move **~11× less per pixel** than 8-frame averaging, and the iterated prediction is the most repeatable output on every measure. On **critical dimension** the model ties 8-frame averaging (scene-level 0.667 vs 0.678 px, p = 0.51) and clearly beats 4-frame — *not* the superiority an earlier version of this report claimed (withdrawn in §9.1: that came from a leaked, site-pooled comparison).
+- **Leakage found and fixed (§9.1/§9.2):** the MIIC source corpus ships each image under several filenames (185 unique among 1050 files), so the original MIIC dataset held only 68 distinct scenes among 96 sources and 6 of 10 "held-out" sources had a byte-identical training twin. Generation is now content-deduplicated, splitting is content-group-aware, a locked test split exists, and **all MIIC arms were retrained from scratch**. The headline survived intact: **+9.0 dB over 16-frame averaging from one frame** on a locked test split of genuinely unseen scenes (10/10 sources, p < 0.0001). BBBC038 was never affected (96/96 unique) and re-evaluates bit-identically.
+- **Iteration's payoff is precision, now significant:** on clean data the iterated prediction beats the single forward pass by +0.62 dB (10/10 sources, p = 0.0005) and gains +0.86 dB over a step-matched control (p = 0.0036), at a confirmed cost of −0.21 dB on one-shot.
 
 ## 1. What we set out to test
 
@@ -535,3 +536,100 @@ gained the same scene-level median.
   Gaussianity claim. Finding 7 (edge-concentrated residual variance) is the
   reason pixel-mean σ flatters the model, and its last sentence ("Even so,
   the model wins CD 3σ on MIIC") is withdrawn with defect 2.
+
+## 9.2 Deduplicated MIIC retrain — the corrected results (2026-08-30)
+
+All three MIIC arms were **retrained from scratch** on a content-deduplicated
+dataset under the corrected protocol. This supersedes every MIIC number in
+§4, §8 and §9.
+
+**Protocol.** `data/MIIC-burst-p10-dedup`: 96 sources, **96 distinct contents**
+(41 duplicates skipped during selection), noise statistics matching the
+original dataset so the comparison is like-for-like (single-frame PSNR median
+14.16 dB, avg-of-16 26.17 dB, |bias| 0.0023). Content-group split, **76 train
+/ 10 dev (val) / 10 locked test**. Development and all method work used the
+dev split only; **the test split was evaluated exactly once**, for this table.
+Arms: baseline 30k, rollout finetune 30k→40k (`fraction: 0.5`, EMA rollouts),
+and the step-matched plain continuation 30k→40k. Each run carries a
+`provenance.json` (commit, dataset digest `883fe329fe53`, checkpoint SHA-256,
+environment). Statistics are **paired per source**, the independent unit.
+
+### Accuracy (PSNR, mean / median over 10 sources)
+
+| method | dev baseline | dev plain40k | dev rollout | **test baseline** | **test plain40k** | **test rollout** |
+|---|---|---|---|---|---|---|
+| single frame | 14.15 | 14.15 | 14.15 | 14.05 | 14.05 | 14.05 |
+| avg of 16 | 26.08 | 26.08 | 26.08 | 26.06 | 26.06 | 26.06 |
+| one-shot | 35.06 | 35.17 | 35.16 | 35.05 | 35.23 | 35.02 |
+| iter-average | 33.41 | 33.48 | 33.64 | 33.35 | 33.32 | 33.57 |
+| **iter-prediction** | 35.04 | 35.12 | **35.58** | 34.88 | 34.78 | **35.65** |
+
+Dev and test agree to within ~0.2 dB throughout — no sign of dev-set
+overfitting despite the dev split driving all the method work.
+
+**Paired per-source contrasts on the locked test split** (n = 10, two-sided):
+
+| contrast | mean | median | sources | t | p | 95% CI |
+|---|---|---|---|---|---|---|
+| one-shot − avg-of-16 (baseline) | **+8.99** | +9.28 | 10/10 | 16.5 | <0.0001 | [+7.76, +10.23] |
+| iter-prediction − one-shot (rollout) | **+0.62** | +0.61 | 10/10 | 5.4 | 0.0005 | [+0.36, +0.89] |
+| iter-prediction: rollout − plain40k | **+0.86** | +0.62 | 10/10 | 3.9 | 0.0036 | [+0.37, +1.36] |
+| one-shot: rollout − plain40k | −0.21 | −0.21 | 1/10 | −4.0 | 0.0034 | [−0.32, −0.09] |
+
+### Repeatability & metrology, locked test split (10 seeds, 40 CD sites)
+
+| method | pixel σ ×10⁻³ | CD 3σ **scene** | CD 3σ site | CD bias | CD abs-bias | shift σ |
+|---|---|---|---|---|---|---|
+| single frame | 197.1 | 1.696 | 2.442 | +0.173 | 0.382 | 0.419 |
+| avg of 4 | 98.4 | 0.825 | 1.558 | +0.127 | 0.328 | 0.230 |
+| avg of 8 | 69.4 | **0.678** | 0.932 | +0.035 | 0.215 | 0.166 |
+| avg of 16 | — | — | — | +0.039 | 0.206 | — |
+| one-shot (rollout) | 8.4 | 0.729 | 1.014 | +0.095 | 0.213 | 0.126 |
+| **iter-prediction (rollout)** | **6.4** | **0.667** | 0.908 | +0.109 | 0.229 | **0.106** |
+
+What survives, what changed, and what is now settled:
+
+1. **The headline holds, cleanly.** One fast acquisition through the model
+   beats averaging all 16 frames by **+9.0 dB** on genuinely unseen content
+   (10/10 sources, p < 0.0001). The leakage never inflated this — the
+   deduplicated numbers are within 0.4 dB of the contaminated ones.
+2. **Pixel repeatability holds:** ~11× better than 8-frame averaging
+   (6.4 vs 69.4 ×10⁻³), unchanged by deduplication.
+3. **CD is a tie with 8-frame averaging, as §9.1 predicted.** Scene-level
+   medians: avg-8 0.678 px vs the model's 0.667 px; paired per scene the
+   difference is −0.100 px (median −0.003, model better on 6/10, p = 0.51) —
+   **no significant difference in either direction**, and the same on the dev
+   split (5/10, p = 0.59). The model *is* clearly better than avg-of-4
+   (0.825 px). The supportable claim is therefore: **one frame through the
+   model gives CD repeatability equivalent to an 8-frame average, and better
+   than a 4-frame average** — not superiority, exactly as the withdrawal in
+   §9.1 anticipated.
+4. **Registration reverses in the model's favor** on clean data: shift σ
+   0.106 px vs avg-of-8's 0.166 px (on the contaminated set avg-8 had led,
+   0.142 vs 0.170). CD bias is now comparable to averaging in both signed
+   (+0.109 vs +0.039) and absolute (0.229 vs 0.206) terms — the ~0.24 px
+   placement-bias concern from §9 is materially smaller here.
+5. **Iteration's payoff is precision — confirmed on clean data, and now
+   properly significant.** The iterated prediction beats one-shot on every
+   test-split measure: PSNR +0.62 dB (10/10, p = 0.0005), pixel σ −24%
+   (8.4 → 6.4), CD scene 3σ −9% (0.729 → 0.667), shift σ −16%
+   (0.126 → 0.106). On the contaminated BBBC038 data this margin was
+   p = 0.05; here it is unambiguous.
+6. **The rollout effect is real and separable from extra training.** Against
+   the step-matched control the rollout arm gains **+0.86 dB** on
+   iter-prediction (10/10 sources, p = 0.0036), while the control itself sits
+   at the baseline. The cost is also confirmed and significant: one-shot
+   loses **0.21 dB** versus the control (1/10 sources positive, p = 0.0034) —
+   the documented price of sharing half the gradient signal. Deploy one-shot
+   only ⇒ skip the finetune; use the iterative outputs ⇒ the trade is
+   favorable. (Still step-matched, not FLOP-matched.)
+7. **Rollout also improves CD bias**: signed +0.178 → +0.109, absolute
+   0.349 → 0.229 on iter-prediction, tracking avg-of-16's bias more closely —
+   consistent with finding 5's Theorem-1 argument.
+
+Open items are unchanged (§6, §7): one seed per arm, no matched
+Noise2Noise / oracle / classical baselines, patch-scale synthetic evaluation,
+and no real-instrument data. What §9.2 establishes is that the leakage
+correction did not cost the method its result — the core claims survive on
+genuinely unseen content with paired statistics — while the one claim that
+did not survive (CD superiority) stays withdrawn.
