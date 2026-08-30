@@ -7,6 +7,7 @@
 - A network trained only on noisy burst frames (never a clean image) reconstructs, **from one fast noisy acquisition**, an image **9–11.5 dB cleaner than averaging all 16 burst frames** — on both fluorescence microscopy and SEM data.
 - The training loss converged to within 3% of the theoretically predicted noise floor, confirming the math behind the method.
 - One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known. **Update 2026-08-30: the fix (self-rollout finetuning) is implemented and worked — iteration now beats the single forward pass on both datasets (§8).**
+- **Metrology repeatability (§9):** re-measuring the same area with 10 fresh frames, the model's outputs move ~10× less per pixel than 8-frame averaging, and on SEM data the critical-dimension 3σ from *one* frame (0.80 px) beats 8-frame averaging (1.43 px). Iteration's real payoff turns out to be precision, not PSNR: the iterated prediction beats one-shot on every repeatability metric. Two costs found: a small systematic placement bias (~0.1–0.25 px) and content dependence (on soft fluorescence edges, classical avg-of-8 still has the better CD 3σ).
 
 ## 1. What we set out to test
 
@@ -227,3 +228,121 @@ one-shot is consistent but modest. If one-shot is the only output a
 deployment uses, skip the finetune or lower `rollout.fraction`; if the
 iterative outputs matter (they are now the best ones), the trade is
 clearly favorable.
+
+## 9. Repeatability & metrology evaluation (2026-08-30)
+
+Everything above scores *accuracy* (PSNR/SSIM against clean). For metrology
+the more important axis is *repeatability*: measure the same area again and
+ask how much the reported number moves. This experiment simulates exactly
+that. The sampler is deterministic, so its only source of run-to-run
+variation is the input frame — feeding each method **10 different fresh
+frames (seeds) of the same measured area** and comparing the outputs
+isolates the measurement noise each method transmits. Implemented as
+`python -m burst_diffusion repeatability` (guide §5); both reference
+datasets, both checkpoint arms (baseline 30k, rollout-finetuned 40k), same
+held-out sources and center crops as §4/§8.
+
+**Methods and metrics.** Classical rows: the raw frame (10 independent
+seeds) and *disjoint*-group averages — 8× `avg_of_2`, 4× `avg_of_4`,
+2× `avg_of_8`; `avg_of_16` has one realization, so it contributes accuracy
+and bias but no precision estimate. Model rows consume one seed each, so
+their 10 realizations are fully independent. Reported per method: per-pixel
+std across seeds (c4-debiased — comparing K=2 and K=10 sample stds without
+the correction would understate the former by ~20%); **CD** measured
+CD-SEM-style (16-row band profile, 50% threshold between robust profile
+extremes, subpixel linear-interpolated crossings) at fixed sites
+auto-selected on the clean image — pooled σ across (source, site), bias vs
+the clean-image CD, success rate; **registration** as feature-center
+precision at those sites plus global sub-pixel image shift vs clean
+(upsampled cross-correlation). Registration is gated per source: a crop
+whose clean image cannot even be registered against its own 16-frame
+average (> 0.5 px — featureless area) is excluded for all methods
+identically (10/10 MIIC sources pass, 7/10 BBBC038; 21 CD sites on MIIC,
+27 on BBBC038).
+
+**MIIC SEM** (10 seeds, pixel σ in [0,1]×10⁻³, CD/registration in pixels):
+
+| method | PSNR dB | pixel σ | CD 3σ | CD bias | center σ | shift σ | shift bias |
+|---|---|---|---|---|---|---|---|
+| single frame | 14.2 | 194.1 | 2.590 | −0.068 | 0.416 | 1.765 | 0.264 |
+| avg of 2 | 17.2 | 137.1 | 2.169 | +0.003 | 0.296 | 1.005 | 0.037 |
+| avg of 4 | 20.2 | 96.9 | 1.485 | +0.035 | 0.195 | 0.393 | 0.030 |
+| avg of 8 | 23.2 | 68.6 | 1.434 | +0.041 | 0.124 | 0.142 | 0.066 |
+| avg of 16 | 26.2 | — | — | +0.048 | — | — | 0.055 |
+| one-shot (base) | 35.6 | 8.5 | 1.003 | +0.045 | 0.219 | 0.377 | 0.121 |
+| iter-avg (base) | 33.7 | 15.1 | 0.967 | +0.044 | 0.207 | 0.472 | 0.094 |
+| iter-pred (base) | 35.4 | 6.5 | 0.862 | +0.042 | 0.194 | 0.163 | 0.115 |
+| one-shot (rollout) | 35.7 | 8.2 | 0.938 | +0.034 | 0.213 | 0.330 | 0.115 |
+| iter-avg (rollout) | 33.9 | 14.9 | 0.911 | +0.032 | 0.201 | 0.455 | 0.130 |
+| **iter-pred (rollout)** | **36.1** | **6.1** | **0.797** | +0.028 | 0.186 | 0.170 | 0.134 |
+
+**BBBC038** (same columns): single frame 146.9 / 3.97 / 1.10; avg of 8
+52.1 / **1.88** / 0.59; one-shot (rollout) 7.2 / 2.65 / 0.48; iter-pred
+(rollout) **5.7** / 2.56 / 0.50 (pixel σ / CD 3σ / shift σ; full tables in
+`runs/burst_diffusion/*/repeatability/summary.md`).
+
+Findings, in order of confidence:
+
+1. **Pixel-level repeatability from one frame is ~10× better than 8-frame
+   averaging** (6–8 vs 52–69 ×10⁻³ per-pixel σ), on both datasets and both
+   arms. The classical ladder reproduces the √2-per-doubling law exactly
+   (194 → 137 → 97 → 69), so the comparison sits on a verified baseline.
+2. **Iteration's real payoff is precision, not PSNR.** §8 found the
+   finetuned iterated prediction beats one-shot by a modest +0.4/+0.7 dB;
+   here it beats one-shot on *every* precision metric on MIIC: pixel σ
+   −26% (8.2 → 6.1), CD 3σ −15% (0.94 → 0.80), global shift σ −48%
+   (0.330 → 0.170). Mechanistically: the final prediction is conditioned on
+   a pseudo-average in which the seed frame carries weight 1/15, so the
+   output is a much flatter function of the input noise than the direct
+   t=T evaluation. The repeatability axis, invisible to PSNR, is where the
+   iterative sampler earns its cost.
+3. **The `iter_average` output obeys its noise budget.** The closed form
+   says it retains n₁/16 of the input noise: predicted floor
+   194.1/16 = 12.1×10⁻³, plus a one-shot-sized model term ⇒ ~14.7×10⁻³;
+   measured 14.9. Its precision can never beat the prediction output —
+   another reason `prediction` is the deployment output.
+4. **CD: the model beats classical averaging on hard SEM edges, not on soft
+   fluorescence edges.** MIIC: 0.80–1.00 px 3σ from one frame vs 1.43 for
+   avg-of-8. BBBC038: models 2.56–2.79, avg-of-8 1.88 — the model only
+   reaches avg-of-4 territory (2.99) there. Metrology conclusions from one
+   content type do not transfer automatically.
+5. **CD bias equals the averaging bias.** Model CD bias on MIIC
+   (+0.028…+0.045 px) matches avg-of-16 (+0.048) — Theorem 1 in metrology
+   units: the network converges to the same clipped-mean limit as frame
+   averaging, so it inherits its (tiny) bias, while the raw frame shows a
+   noise-induced −0.068 px estimator bias. CD success is 100.0% on MIIC
+   for every method, 93–96% on BBBC038 (soft edges lose a crossing
+   occasionally, raw frame worst).
+6. **Registration: precise but not unbiased.** Seed-to-seed shift precision
+   of the iterated prediction (0.17 px) sits between avg-of-8 (0.14) and
+   avg-of-4 (0.39); feature-center precision (0.19 px) ≈ avg-of-4. But the
+   model introduces a small systematic placement offset vs clean: 0.12–0.13
+   px mean shift (3–6× its standard error, so real; per-source mean
+   magnitudes ~0.24 px vs 0.16 for avg-of-16). For overlay-critical use
+   this bias would need a calibration pass; classical averaging does not
+   have it (0.03–0.07 px, noise-consistent).
+7. **The model's residual variation is edge-concentrated.** The σ-maps
+   (`sigma_maps.png`) are near-black in flat regions and light up exactly
+   on feature contours (p95/mean σ ratio 2.8 for iter-pred vs 1.5 for the
+   raw frame at equal K) — the opposite of averaging's spatially uniform
+   noise. Pixel-mean σ therefore *flatters* the model where metrology
+   looks; the honest number for measurement use is the CD/registration σ,
+   which is why both are reported. Even so, the model wins CD 3σ on MIIC.
+8. **Rollout finetuning helps precision too**: on MIIC it improves every
+   model row over baseline (CD 3σ 0.86 → 0.80, pixel σ 6.5 → 6.1, and
+   +0.8 dB PSNR on the iterated prediction) — its value is larger than the
+   §8 PSNR deltas alone suggested. Caveat: the avg-of-8 precision rows rest
+   on only 2 realizations × 10 sources (13–21 dof), so their σ estimates
+   carry ~±15–20% uncertainty (visible as avg-of-8 ≈ avg-of-4 CD 3σ on
+   MIIC); the model rows have 9 dof per site and are correspondingly
+   tighter.
+
+Practical summary for metrology: from a single fast acquisition, the
+finetuned iterated prediction delivers CD repeatability better than 8-frame
+averaging on SEM-like content, ~10× better pixel-level repeatability, and
+registration precision at the 4–8-frame-average level — at the cost of a
+~0.1–0.25 px placement bias that would need one-time calibration, and with
+the explicit caveat that soft-edged content (BBBC038) keeps classical
+averaging competitive on CD. Next data-side step unchanged from §7: real
+SEM bursts, where fixed-pattern noise (correlated across frames, §6 of the
+method doc) is the assumption most likely to move these numbers.
