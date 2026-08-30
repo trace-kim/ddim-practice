@@ -5,6 +5,7 @@
 **TL;DR**
 
 - A network trained only on noisy burst frames (never a clean image) reconstructs, **from one fast noisy acquisition**, an image **9–11.5 dB cleaner than averaging all 16 burst frames** — on both fluorescence microscopy and SEM data.
+- **This headline is a Noise2Noise result, not a diffusion result (§9.3).** A matched, capacity- and compute-equal plain N2N model *beats* every output of the schedule pipeline from a single frame (+0.97 dB over the matched arm, 10/10 sources, p = 0.0001). The averaging schedule earns its place differently: it is what lets **one** network span the dose range, winning at every $m \ge 2$ real frames and by +5.8 dB at $m = 15$, where plain N2N instead *degrades*. Generalist-vs-specialist, not better-vs-worse.
 - The training loss converged to within 3% of the theoretically predicted noise floor, confirming the math behind the method.
 - One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known. **Update 2026-08-30: the fix (self-rollout finetuning) is implemented and worked — iteration now beats the single forward pass on both datasets (§8).**
 - **Metrology repeatability (§9, corrected in §9.2):** re-measuring the same area with 10 fresh frames, the model's outputs move **~11× less per pixel** than 8-frame averaging, and the iterated prediction is the most repeatable output on every measure. On **critical dimension** the model ties 8-frame averaging (scene-level 0.667 vs 0.678 px, p = 0.51) and clearly beats 4-frame — *not* the superiority an earlier version of this report claimed (withdrawn in §9.1: that came from a leaked, site-pooled comparison).
@@ -627,9 +628,101 @@ What survives, what changed, and what is now settled:
    0.349 → 0.229 on iter-prediction, tracking avg-of-16's bias more closely —
    consistent with finding 5's Theorem-1 argument.
 
-Open items are unchanged (§6, §7): one seed per arm, no matched
-Noise2Noise / oracle / classical baselines, patch-scale synthetic evaluation,
-and no real-instrument data. What §9.2 establishes is that the leakage
-correction did not cost the method its result — the core claims survive on
-genuinely unseen content with paired statistics — while the one claim that
-did not survive (CD superiority) stays withdrawn.
+Open items after §9.2: one seed per arm, no clean-supervised oracle or
+classical (Anscombe+BM3D) baseline, patch-scale synthetic evaluation, and no
+real-instrument data. The matched Noise2Noise baseline has since been run —
+§9.3. What §9.2 establishes is that the leakage correction did not cost the
+method its result — the core claims survive on genuinely unseen content with
+paired statistics — while the one claim that did not survive (CD superiority)
+stays withdrawn.
+
+## 9.3 The matched Noise2Noise ablation: what the schedule is actually for (2026-08-30)
+
+Every number above compares the method against *frame averaging*. That is the
+practice it aims to replace, but it is the wrong control for the question
+"does the diffusion-style **schedule** earn its place?" — because `one_shot`,
+the source of the headline, is a single forward pass whose optimum is exactly
+Noise2Noise's (Theorem 1). One-shot *is* an N2N denoiser; the open question
+was never about inference but about **training**: the reported network spread
+its gradient over 15 averaging levels ($m = 1..15$), while a plain N2N model
+would spend all of it at $m = 1$.
+
+**The ablation.** `configs/burst_diffusion/miic_p10_dedup_n2n.yml` sets
+`schedule.num_steps: 1`, which collapses the schedule to its $m=1$ endpoint:
+every training sample becomes one noisy frame in, one independent fresh noisy
+frame as target — textbook Noise2Noise, with the $t$ embedding constant.
+Everything else is identical to the §9.2 baseline: same 8.95M-parameter U-Net,
+same dataset, same content-group split (verified byte-identical — every source
+has all 16 replicas, so the differing `min_replicas` requirement drops
+nobody), same batch size, LR, EMA, seed and 30,000 steps. So the *only*
+difference is where the gradient went.
+
+### Result 1: for a single frame, plain Noise2Noise is better
+
+Locked test split, paired per source (n = 10):
+
+| comparison | Δ PSNR | sources | p |
+|---|---|---|---|
+| N2N − schedule one-shot (matched 30k) | **+0.97 dB** | 10/10 | 0.0001 |
+| N2N − schedule one-shot (40k control) | +0.79 dB | 10/10 | 0.0011 |
+| N2N − rollout iter-prediction (best schedule output, 40k) | +0.37 dB | 7/10 | 0.043 |
+| N2N − avg-of-16 | +9.96 dB | 10/10 | <0.0001 |
+
+The plain N2N model (36.02 dB) beats **every** output the schedule pipeline
+produces, including the rollout-finetuned iterated prediction (35.65 dB) which
+cost 10,000 extra steps at ~3.8× the per-step compute. On the metrology axis
+the two are a tie — N2N pixel σ 6.31 vs 6.39 ×10⁻³, CD scene 3σ 0.633 vs
+0.667 px (paired p = 0.87), shift σ 0.110 vs 0.106 px — so N2N matches the
+schedule there while winning on PSNR.
+
+**The +9–10 dB headline is therefore a Noise2Noise result, not a diffusion
+result.** It is if anything *stronger* without the schedule. Any framing that
+attributes the single-frame headline to the diffusion apparatus is wrong.
+
+### Result 2: the schedule earns its place the moment you have ≥2 frames
+
+The schedule's actual function is that one $t$-conditioned network spans the
+whole dose/throughput trade-off. Feeding each model a real $m$-frame average
+(schedule queried at the matching $t = 16-m$; N2N has only its one level):
+
+| real frames $m$ | schedule | N2N | plain average | paired Δ | sources | p |
+|---|---|---|---|---|---|---|
+| 1 | 35.05 | **36.02** | 14.05 | −0.97 | 0/10 | 0.0001 |
+| 2 | **36.75** | 35.88 | 17.10 | +0.88 | 9/10 | 0.0032 |
+| 4 | **37.50** | 34.64 | 20.07 | +2.86 | 10/10 | <0.0001 |
+| 8 | **38.30** | 33.82 | 23.04 | +4.48 | 10/10 | <0.0001 |
+| 15 | **38.85** | 33.08 | 25.77 | +5.77 | 10/10 | <0.0001 |
+
+(Test split; val reproduces the same crossover: −0.66, +0.79, +2.57, +4.02,
++5.07 dB.) The schedule model improves monotonically with more real
+measurements, 35.05 → 38.85 dB. The N2N model **degrades**, 36.02 → 33.08 dB:
+a low-noise averaged input is off-distribution for a network trained only on
+single-frame noise, so it keeps removing noise that is no longer there. The
+crossover is at $m = 2$, and the schedule's advantage grows monotonically
+after it — to +5.8 dB at $m = 15$, where the schedule model (38.85 dB) also
+comfortably exceeds N2N's best-case single-frame result (36.02 dB).
+
+### What this means
+
+Stated as a deployment rule rather than a defence of either method:
+
+- **One acquisition, ever, and nothing else** → use plain Noise2Noise. It is
+  ~1 dB better, equal on metrology, and cheaper to train. The schedule costs
+  you about 1 dB for a capability you are not using.
+- **Two or more acquisitions available, or a variable dose budget** → use the
+  schedule. One network then covers every $m$, beats N2N at every $m \ge 2$,
+  and the margin grows with dose. Retraining a separate N2N model per noise
+  level is the only alternative.
+
+So the $t$-conditioning is a **generalist-vs-specialist trade**, and the
+report's own framing needs that correction: the schedule was presented as
+improving single-frame denoising, and it does not — it buys dose-scalability,
+at a measured ~1 dB single-frame cost. The iterative sampler and rollout
+finetuning sit *inside* the schedule branch, so §9.2's conclusions about them
+stand as stated, but they are improvements to an output that a plain N2N model
+still beats from one frame.
+
+**Caveat, stated plainly:** one training seed per arm. The single-frame effect
+(+0.97 dB, 10/10 sources, p = 0.0001) and the multi-frame effects (up to
++5.8 dB, 10/10) are large and monotone, but per-source pairing does not
+address training-run variance; seed replication remains open (§7).

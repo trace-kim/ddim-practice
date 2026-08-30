@@ -1,0 +1,58 @@
+# Matched Noise2Noise baseline: the ablation that isolates what the AVERAGING
+# SCHEDULE contributes to single-frame denoising.
+#
+# `schedule.num_steps: 1` collapses the schedule to its m=1 endpoint: m(t) =
+# T+1-t = 1, so every training sample is one noisy frame in, one INDEPENDENT
+# fresh noisy frame as target -- exactly Noise2Noise (Lehtinen et al. 2018),
+# with the t embedding held constant. Everything else is identical to
+# miic_p10_dedup.yml: same U-Net and capacity, same dataset, same content-group
+# split (verified identical -- every source has all 16 replicas, so the
+# different min_replicas requirement drops nobody), same batch size, LR, EMA,
+# seed and 30,000 steps.
+#
+# The comparison of record is `one_shot` on this model vs `one_shot` on
+# miic_p10_dedup (the 30k baseline), per source. one_shot is a single forward
+# pass on the raw frame in both cases, so the ONLY difference is whether
+# training spread its gradient over m = 1..15 averaging levels or spent all of
+# it at m = 1.
+#
+#   python -m burst_diffusion train --config configs/burst_diffusion/miic_p10_dedup_n2n.yml
+#
+# Note the iterative rows are degenerate here and should be ignored: with T=1
+# the sampler takes a single step, so iter_prediction == one_shot and
+# iter_average is just the mean of the input frame and the prediction.
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+schedule:
+  num_steps: 1
+  target_mode: fresh
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/miic_p10_dedup_n2n
+  batch_size: 8
+  max_steps: 30000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000
+sampling:
+  output_mode: both
+  num_sample_steps: null
