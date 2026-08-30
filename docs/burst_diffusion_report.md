@@ -469,9 +469,10 @@ from *leaked* scenes. Recomputing per scene from the saved measurements:
 The model wins 2 of 5 scenes, both leaked; avg-8 wins both genuinely unseen
 scenes. Pooled over the unseen scenes only, avg-8 is 0.420 px vs the model's
 0.875 px. The site-pooled headline was carried by leaked scene 16, where
-avg-8 happened to draw a large σ on 6 degrees of freedom. An independent
-re-evaluation on 32 content-disjoint MIIC scenes agrees: avg-8 0.537 px vs
-rollout 0.574 px.
+avg-8 happened to draw a large σ on only 6 degrees of freedom. A wider
+diagnostic agrees: re-running these same (leakage-trained) checkpoints over
+32 content-disjoint MIIC scenes gives site-pooled avg-8 0.537 px vs rollout
+0.574 px — still no model CD advantage, on 3× the scenes.
 
 **The claim "one-frame CD repeatability beats 8-frame averaging" is
 withdrawn.** What the evidence supports is that one-frame CD repeatability
