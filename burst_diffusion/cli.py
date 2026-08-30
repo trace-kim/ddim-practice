@@ -245,3 +245,55 @@ def evaluate(
             f"{name:>15}: PSNR {method['psnr_mean']:6.2f} dB | SSIM {method['ssim_mean']:.4f}"
         )
     typer.echo(f"results written to {Path(out) / 'results.json'}")
+
+
+@app.command()
+def repeatability(
+    config: Path = typer.Option(..., help="YAML config path (dataset + schedule)."),
+    checkpoint: list[str] = typer.Option(
+        ...,
+        help="Checkpoint arm as NAME=PATH (repeatable; a bare PATH is named 'model').",
+    ),
+    out: Path = typer.Option(..., help="Output directory for repeatability.json + summary.md."),
+    split: str = typer.Option("val", help="val | train"),
+    limit: Optional[int] = typer.Option(None, help="Evaluate at most this many sources."),
+    seeds: int = typer.Option(10, min=1, help="Fresh frames (seeds) per source."),
+    steps: Optional[int] = typer.Option(None, help="Accelerated sampling step count."),
+    device: Optional[str] = typer.Option(None, help="auto | cpu | cuda (default: config)."),
+) -> None:
+    """Measure per-method repeatability plus CD / registration metrology."""
+    from .config import load_config
+    from .repeatability import repeatability as run_repeatability
+
+    checkpoints: dict[str, Path] = {}
+    for entry in checkpoint:
+        arm, _, path = entry.partition("=")
+        if not path:
+            arm, path = "model", entry
+        if arm in checkpoints:
+            raise typer.BadParameter(f"duplicate checkpoint arm {arm!r}")
+        checkpoints[arm] = Path(path)
+
+    results = run_repeatability(
+        load_config(config),
+        checkpoints,
+        out_dir=out,
+        split=split,
+        limit=limit,
+        num_seeds=seeds,
+        sample_steps=steps,
+        device=device,
+        progress_callback=lambda done, total: typer.echo(f"source {done}/{total}", err=True),
+    )
+    for name, method in results["methods"].items():
+        pixel = method["pixel_repeatability"]
+        pixel_text = "-" if pixel is None else f"{pixel['sigma_mean'] * 1e3:6.2f}e-3"
+        cd3 = method["cd"]["pooled_3sigma_px"]
+        cd_text = "-" if cd3 is None else f"{cd3:6.3f} px"
+        shift = method["registration"]["shift_sigma_px"]
+        shift_text = "-" if shift is None else f"{shift:6.3f} px"
+        typer.echo(
+            f"{name:>26}: PSNR {method['accuracy']['psnr_mean']:6.2f} dB | "
+            f"pixel sigma {pixel_text} | CD 3sigma {cd_text} | shift sigma {shift_text}"
+        )
+    typer.echo(f"results written to {Path(out) / 'repeatability.json'}")

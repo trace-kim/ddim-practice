@@ -58,7 +58,7 @@ def _write_config(path: Path, dataset_dir: Path, run_dir: Path) -> Path:
 
 
 @pytest.mark.parametrize(
-    "command", ["generate", "preview", "train", "sample", "evaluate"]
+    "command", ["generate", "preview", "train", "sample", "evaluate", "repeatability"]
 )
 def test_every_subcommand_has_help(command: str) -> None:
     result = runner.invoke(app, [command, "--help"])

@@ -197,6 +197,46 @@ captioned `comparison_grid.png`):
 (full-image inference via overlapping 64px tiles, uniform blending) are
 available.
 
+### Repeatability & metrology (`repeatability`)
+
+PSNR measures accuracy; metrology cares about *precision*: acquire the same
+area again and ask how much the reported number moves. The sampler is
+deterministic, so running it on K different real burst frames ("seeds") of the
+same source isolates exactly the measurement noise each method transmits:
+
+```powershell
+python -m burst_diffusion repeatability --config configs/burst_diffusion/miic_p10.yml `
+  --checkpoint baseline=runs/burst_diffusion/miic_p10/ckpt_latest.pt `
+  --checkpoint rollout=runs/burst_diffusion/miic_p10_rollout/ckpt_latest.pt `
+  --out runs/burst_diffusion/miic_p10/repeatability
+```
+
+`--checkpoint NAME=PATH` is repeatable; each arm's model methods appear as
+`one_shot@NAME` / `iter_average@NAME` / `iter_prediction@NAME` next to the
+shared classical rows: `single_frame` (K seeds) and disjoint-group
+`avg_of_2/4/8/16` ladders (`avg_of_N` from all N frames has a single
+realization, so it reports accuracy and bias but no precision). Outputs
+(`repeatability.json`, `summary.md`, `sigma_maps.png`) cover, per method:
+
+- **pixel repeatability** — per-pixel std across seeds (c4-debiased so
+  different realization counts stay comparable);
+- **accuracy** — PSNR/SSIM vs clean, mean over seeds;
+- **CD (critical dimension)** — edge pairs measured CD-SEM-style (16-row band
+  profile, 50% threshold between robust profile extremes, subpixel
+  linear-interpolated crossings) on fixed sites auto-selected from the clean
+  image; pooled sigma/3-sigma across (source, site), bias vs the clean-image
+  CD, and measurement success rate;
+- **registration** — feature-center precision from the same sites, plus
+  global sub-pixel image shift vs clean (upsampled cross-correlation),
+  precision and bias.
+
+Sources whose registrability gate fails — the clean image registered against
+its own all-frame average lands > 0.5 px, i.e. a near-featureless crop that
+nothing can register against — are excluded from the shift statistics of
+every method identically (`registrable sources` in the summary header).
+`--seeds 10` and the full sampling schedule are the defaults; `--steps K`
+switches to the accelerated sampler.
+
 ## 6. Real equipment data (no clean images)
 
 Training never uses clean images, so real bursts work directly:
