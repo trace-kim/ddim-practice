@@ -129,15 +129,19 @@ def test_cd_measurement_fails_gracefully_without_a_feature() -> None:
 
 
 def _write_bar_burst(root: Path, *, num_sources: int = 4, replicas: int = 4) -> Path:
-    """Structured burst dataset: 20x24 images with a bar the center crop sees."""
+    """Structured burst dataset: 20x24 images with a bar the center crop sees.
+
+    Every source gets a DISTINCT bar width: sources sharing clean content would
+    (correctly) collapse into one content group and leave the split empty.
+    """
     burst = root / "burst"
     (burst / "clean").mkdir(parents=True)
     (burst / "noisy").mkdir(parents=True)
     rng = np.random.default_rng(0)
     rows = []
     for source_index in range(num_sources):
-        # Bar columns [9.5, 14.5] land at [5.5, 10.5] inside the 16px center crop.
-        profile = _bar_image(24, 9.5, 14.5)[0]
+        # Bar columns [9.5, 14.5+i/4] land inside the 16px center crop.
+        profile = _bar_image(24, 9.5, 14.5 + source_index / 4.0)[0]
         clean = np.rint(np.tile(profile, (20, 1)) * 255.0).astype(np.uint8)
         Image.fromarray(clean).save(burst / "clean" / f"{source_index:05d}.png")
         for replica_index in range(replicas):
@@ -275,7 +279,7 @@ def test_misaligned_frames_fail_the_registration_gate_for_every_method(tmp_path:
     rng = np.random.default_rng(0)
     rows = []
     for source_index in range(4):
-        profile = _bar_image(24, 9.5, 14.5)[0]
+        profile = _bar_image(24, 9.5, 14.5 + source_index / 4.0)[0]
         clean = np.rint(np.tile(profile, (20, 1)) * 255.0).astype(np.uint8)
         Image.fromarray(clean).save(burst / "clean" / f"{source_index:05d}.png")
         moved = np.roll(clean, 3, axis=1)

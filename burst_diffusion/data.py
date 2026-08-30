@@ -18,6 +18,7 @@ Design notes (see docs in the package README):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import warnings
@@ -31,6 +32,19 @@ from PIL import Image
 from .schedule import frames_at, min_replicas
 
 _SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B", "I;16N", "I")
+
+
+def content_key(array: np.ndarray) -> str:
+    """Content hash of a clean image (shape-tagged, so different sizes never collide).
+
+    The identity used for group-aware splitting and for generation-time
+    deduplication: two sources with the same key are the same picture and must
+    never land on opposite sides of a train/validation split.
+    """
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(np.ascontiguousarray(array).tobytes())
+    return digest.hexdigest()
 
 
 def resolve_burst_dir(dataset_dir: str | Path) -> Path:
@@ -126,6 +140,7 @@ class BurstCache:
         min_replicas: int = 2,
         min_size: int = 1,
         val_fraction: float = 0.1,
+        test_fraction: float = 0.0,
         split_seed: int = 2019,
     ):
         if channels not in (1, 3):
@@ -134,6 +149,13 @@ class BurstCache:
             raise ValueError(f"min_replicas must be >= 1, got {min_replicas}")
         if not 0.0 <= val_fraction < 1.0:
             raise ValueError(f"val_fraction must be in [0, 1), got {val_fraction}")
+        if not 0.0 <= test_fraction < 1.0:
+            raise ValueError(f"test_fraction must be in [0, 1), got {test_fraction}")
+        if val_fraction + test_fraction >= 1.0:
+            raise ValueError(
+                f"val_fraction + test_fraction must be < 1, got "
+                f"{val_fraction} + {test_fraction}"
+            )
         self.burst_dir = resolve_burst_dir(dataset_dir)
         self.channels = channels
 
@@ -182,20 +204,61 @@ class BurstCache:
                 f"{len(self.dropped_size)} dropped for size"
             )
 
-        order = np.random.RandomState(split_seed).permutation(len(kept))
-        val_count = 0
-        if val_fraction > 0.0:
-            if len(kept) > 1:
-                val_count = max(1, min(len(kept) - 1, round(val_fraction * len(kept))))
-            else:
-                warnings.warn(
-                    "only one usable source; keeping it for training and leaving "
-                    "the validation split empty",
-                    stacklevel=2,
-                )
-        val_positions = set(order[len(kept) - val_count :].tolist())
-        self.train_sources = [kept[i] for i in range(len(kept)) if i not in val_positions]
+        # Split by CONTENT GROUP, never by source index: image corpora ship the
+        # same picture under several filenames, and splitting indices then puts
+        # byte-identical content on both sides (fresh noise, seen scene), which
+        # silently invalidates every held-out number. Sources whose clean images
+        # hash equal move together. With all-distinct content each group is a
+        # singleton and this reduces exactly to the plain index permutation.
+        groups: dict[str, list[int]] = {}
+        for position, source in enumerate(kept):
+            groups.setdefault(content_key(source.clean), []).append(position)
+        group_members = list(groups.values())
+        self.duplicate_groups = [
+            [kept[position].source_index for position in members]
+            for members in group_members
+            if len(members) > 1
+        ]
+        if self.duplicate_groups:
+            warnings.warn(
+                f"{len(self.duplicate_groups)} duplicated clean image(s) among "
+                f"{len(kept)} sources (e.g. {self.duplicate_groups[:3]}): duplicates are "
+                "kept together on one side of the split, so the validation split holds "
+                "no content seen in training. Prefer regenerating the dataset with "
+                "content-deduplicated sources.",
+                stacklevel=2,
+            )
+
+        # Groups are consumed from the END of the permutation: test first, then
+        # val. Anchoring test at the end keeps it FIXED when val_fraction
+        # changes, so a locked test split stays untouched across development;
+        # with test_fraction=0 val consumes the tail, exactly as before.
+        order = list(reversed(np.random.RandomState(split_seed).permutation(len(group_members)).tolist()))
+        if val_fraction > 0.0 and len(group_members) < 2:
+            warnings.warn(
+                "only one usable content group; keeping it for training and leaving "
+                "the validation split empty",
+                stacklevel=2,
+            )
+        cursor = 0
+        holdouts: dict[str, set[int]] = {}
+        for name, fraction in (("test", test_fraction), ("val", val_fraction)):
+            positions: set[int] = set()
+            if fraction > 0.0 and len(group_members) > 1:
+                target = max(1, round(fraction * len(kept)))
+                while cursor < len(order) and len(positions) < target:
+                    members = group_members[order[cursor]]
+                    taken = sum(len(g) for g in holdouts.values()) + len(positions)
+                    if taken + len(members) > len(kept) - 1:
+                        break  # never leave the training split empty
+                    positions.update(members)
+                    cursor += 1
+            holdouts[name] = positions
+        test_positions, val_positions = holdouts["test"], holdouts["val"]
+        held = test_positions | val_positions
+        self.train_sources = [kept[i] for i in range(len(kept)) if i not in held]
         self.val_sources = [kept[i] for i in range(len(kept)) if i in val_positions]
+        self.test_sources = [kept[i] for i in range(len(kept)) if i in test_positions]
 
     @staticmethod
     def _parse_manifest(manifest_path: Path) -> dict[int, tuple[str, list[tuple[int, str]]]]:
@@ -250,21 +313,39 @@ class BurstCache:
             converted = image.convert("L" if self.channels == 1 else "RGB")
             return np.asarray(converted).copy()
 
+    @property
+    def all_sources(self) -> list[BurstSource]:
+        return self.train_sources + self.val_sources + self.test_sources
+
+    def sources_for_split(self, split: str) -> list[BurstSource]:
+        """Sources of ``'train'``, ``'val'``, or ``'test'``."""
+        try:
+            return {
+                "train": self.train_sources,
+                "val": self.val_sources,
+                "test": self.test_sources,
+            }[split]
+        except KeyError:
+            raise ValueError(
+                f"split must be 'train', 'val', or 'test', got {split!r}"
+            ) from None
+
     def summary(self) -> dict:
         ram_bytes = sum(
             source.clean.nbytes + sum(frame.nbytes for frame in source.frames)
-            for source in self.train_sources + self.val_sources
+            for source in self.all_sources
         )
         return {
             "burst_dir": str(self.burst_dir),
             "train_sources": len(self.train_sources),
             "val_sources": len(self.val_sources),
+            "test_sources": len(self.test_sources),
             "val_source_indices": [source.source_index for source in self.val_sources],
+            "test_source_indices": [source.source_index for source in self.test_sources],
             "dropped_replicas": list(self.dropped_replicas),
             "dropped_size": list(self.dropped_size),
-            "min_frames": min(
-                len(source.frames) for source in self.train_sources + self.val_sources
-            ),
+            "duplicate_groups": [list(group) for group in self.duplicate_groups],
+            "min_frames": min(len(source.frames) for source in self.all_sources),
             "ram_bytes": ram_bytes,
         }
 
@@ -300,7 +381,7 @@ class BatchFactory:
         if not cache.train_sources:
             raise ValueError("cache has no training sources")
         required = min_replicas(num_steps)
-        for source in cache.train_sources + cache.val_sources:
+        for source in cache.all_sources:
             if len(source.frames) < required:
                 raise ValueError(
                     f"source {source.source_index} has {len(source.frames)} frames but "

@@ -8,7 +8,7 @@ import pytest
 import torch
 from PIL import Image
 
-from burst_diffusion.data import BatchFactory, BurstCache, resolve_burst_dir
+from burst_diffusion.data import BatchFactory, BurstCache, content_key, resolve_burst_dir
 
 
 def _write_burst(
@@ -45,17 +45,19 @@ def _write_burst(
     return root
 
 
-def _gradient(height: int = 20, width: int = 24) -> np.ndarray:
+def _gradient(height: int = 20, width: int = 24, offset: int = 0) -> np.ndarray:
+    """Distinct-per-``offset`` gradient: sources must not share clean content,
+    or the content-group split correctly collapses them into one group."""
     rows = np.arange(height, dtype=np.float64)[:, None]
     cols = np.arange(width, dtype=np.float64)[None, :]
-    return np.rint((rows * 7 + cols * 3) % 256).astype(np.uint8)
+    return np.rint((rows * 7 + cols * 3 + offset * 11) % 256).astype(np.uint8)
 
 
 def _standard_dataset(tmp_path: Path, *, num_sources: int = 5, replicas: int = 5) -> Path:
     rng = np.random.default_rng(0)
     sources = {}
     for index in range(num_sources):
-        clean = _gradient()
+        clean = _gradient(offset=index)
         frames = [
             np.clip(
                 clean.astype(np.int16) + rng.integers(-40, 41, clean.shape), 0, 255
@@ -156,17 +158,88 @@ def test_split_is_deterministic_disjoint_and_by_source(tmp_path: Path) -> None:
     assert [s.source_index for s in other_seed.val_sources] != val_indices
 
 
+def test_duplicate_clean_content_never_crosses_the_split(tmp_path: Path) -> None:
+    """The leakage regression: image corpora ship the same picture under several
+    filenames, and an index-level split then puts byte-identical content on both
+    sides (fresh noise, SEEN scene), silently invalidating every held-out number.
+    Duplicated sources must move together."""
+    rng = np.random.default_rng(0)
+    sources = {}
+    for index in range(10):
+        # Sources 0..4 are distinct; 5..9 duplicate the content of 0..4.
+        clean = _gradient(offset=index % 5)
+        frames = [
+            np.clip(clean.astype(np.int16) + rng.integers(-40, 41, clean.shape), 0, 255)
+            .astype(np.uint8)
+            for _ in range(5)
+        ]
+        sources[index] = (clean, frames)
+    root = _write_burst(tmp_path, sources)
+    with pytest.warns(UserWarning, match="duplicated clean image"):
+        cache = _cache(root, val_fraction=0.3)
+
+    train_keys = {content_key(s.clean) for s in cache.train_sources}
+    val_keys = {content_key(s.clean) for s in cache.val_sources}
+    assert train_keys and val_keys
+    assert not (train_keys & val_keys), "validation content also appears in training"
+    # Each duplicate pair (i, i+5) landed wholly on one side.
+    val_indices = {s.source_index for s in cache.val_sources}
+    for index in range(5):
+        assert (index in val_indices) == (index + 5 in val_indices)
+    assert len(cache.duplicate_groups) == 5
+
+
+def test_locked_test_split_is_disjoint_and_survives_a_val_fraction_change(
+    tmp_path: Path,
+) -> None:
+    """A test split must be an anchor: changing val_fraction during development
+    must not leak development scenes into it, or move scenes out of it."""
+    root = _standard_dataset(tmp_path, num_sources=10)
+    cache = _cache(root, val_fraction=0.2, test_fraction=0.2)
+    test_indices = [s.source_index for s in cache.test_sources]
+    val_indices = [s.source_index for s in cache.val_sources]
+    train_indices = [s.source_index for s in cache.train_sources]
+    assert len(test_indices) == 2 and len(val_indices) == 2
+    assert set(test_indices).isdisjoint(val_indices)
+    assert set(test_indices).isdisjoint(train_indices)
+    assert set(train_indices) | set(val_indices) | set(test_indices) == set(range(10))
+
+    widened = _cache(root, val_fraction=0.4, test_fraction=0.2)
+    assert [s.source_index for s in widened.test_sources] == test_indices
+    assert len(widened.val_sources) == 4
+
+
+def test_split_without_a_test_fraction_is_unchanged(tmp_path: Path) -> None:
+    """Backward compatibility: test_fraction=0 must reproduce the historical
+    val split exactly, so results predating the test split stay reproducible."""
+    root = _standard_dataset(tmp_path, num_sources=10)
+    cache = _cache(root, val_fraction=0.2, test_fraction=0.0)
+    assert not cache.test_sources
+    assert [s.source_index for s in cache.val_sources] == [
+        s.source_index for s in _cache(root, val_fraction=0.2).val_sources
+    ]
+
+
+def test_sources_for_split_rejects_an_unknown_name(tmp_path: Path) -> None:
+    cache = _cache(_standard_dataset(tmp_path))
+    assert cache.sources_for_split("train") is cache.train_sources
+    assert cache.sources_for_split("test") is cache.test_sources
+    with pytest.raises(ValueError, match="split must be"):
+        cache.sources_for_split("holdout")
+
+
 def test_single_source_keeps_training_split_and_warns(tmp_path: Path) -> None:
     root = _standard_dataset(tmp_path, num_sources=1)
-    with pytest.warns(UserWarning, match="only one usable source"):
+    with pytest.warns(UserWarning, match="only one usable content group"):
         cache = _cache(root)
     assert len(cache.train_sources) == 1
     assert not cache.val_sources
 
 
 def test_rgb_frames_loaded_as_grayscale_warn_about_channel_averaging(tmp_path: Path) -> None:
-    rgb = np.stack([_gradient()] * 3, axis=-1)
-    root = _write_burst(tmp_path, {0: (rgb, [rgb] * 5), 1: (rgb, [rgb] * 5)})
+    first = np.stack([_gradient(offset=0)] * 3, axis=-1)
+    second = np.stack([_gradient(offset=1)] * 3, axis=-1)
+    root = _write_burst(tmp_path, {0: (first, [first] * 5), 1: (second, [second] * 5)})
     with pytest.warns(UserWarning, match="partially denoises"):
         _cache(root, val_fraction=0.0)
 
@@ -214,14 +287,20 @@ def test_antithetic_pairing_mirrors_the_noise_levels(tmp_path: Path) -> None:
 
 
 def test_subset_averaging_math_is_exact_for_constant_frames(tmp_path: Path) -> None:
-    values = [40, 80, 120, 200, 240]
-    clean = np.full((20, 24), 128, dtype=np.uint8)
-    frames = [np.full((20, 24), value, dtype=np.uint8) for value in values]
-    root = _write_burst(tmp_path, {0: (clean, frames), 1: (clean, frames)})
+    values_by_source = {0: [40, 80, 120, 200, 240], 1: [30, 70, 110, 190, 230]}
+    sources = {
+        index: (
+            np.full((20, 24), 128 + index, dtype=np.uint8),
+            [np.full((20, 24), value, dtype=np.uint8) for value in values],
+        )
+        for index, values in values_by_source.items()
+    }
+    root = _write_burst(tmp_path, sources)
     cache = _cache(root, val_fraction=0.0)
     factory = _factory(cache)
     batch, info = factory.sample_batch(return_info=True)
     for row in range(len(info)):
+        values = values_by_source[info[row].source_index]
         subset_mean = np.mean([values[r] for r in info[row].subset_replicas])
         expected_x = subset_mean / 255.0 * 2.0 - 1.0
         expected_eps = values[info[row].target_replica] / 255.0 * 2.0 - 1.0
@@ -231,15 +310,17 @@ def test_subset_averaging_math_is_exact_for_constant_frames(tmp_path: Path) -> N
 
 
 def test_crops_are_aligned_across_frames_and_match_reported_coordinates(tmp_path: Path) -> None:
-    gradient = _gradient()
+    gradients = {index: _gradient(offset=index) for index in (0, 1)}
     root = _write_burst(
-        tmp_path, {0: (gradient, [gradient] * 5), 1: (gradient, [gradient] * 5)}
+        tmp_path,
+        {index: (image, [image] * 5) for index, image in gradients.items()},
     )
     cache = _cache(root, val_fraction=0.0)
     factory = _factory(cache)
     batch, info = factory.sample_batch(return_info=True)
     for row, sample in enumerate(info):
         top, left = sample.crop_yx
+        gradient = gradients[sample.source_index]
         expected = gradient[top : top + 16, left : left + 16] / 255.0 * 2.0 - 1.0
         np.testing.assert_allclose(
             batch.x_t[row, 0].numpy(), expected.astype(np.float32), atol=1e-6

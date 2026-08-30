@@ -109,6 +109,7 @@ class Trainer:
             min_replicas=min_replicas(config.schedule.num_steps),
             min_size=config.data.image_size,
             val_fraction=config.data.val_fraction,
+            test_fraction=config.data.test_fraction,
             split_seed=config.data.split_seed,
         )
         summary = self.cache.summary()

@@ -8,6 +8,14 @@ the preprocessing and verification the burst-diffusion method needs:
   noise), then pre-scaled into ``[margin, 1 - margin]`` so the pipeline's
   [0, 1] clipping rarely bites (clipped noise is biased and averaging cannot
   remove that bias).
+- Sources are **content-deduplicated before selection**: real image corpora
+  routinely ship the same picture under several filenames (the reference MIIC
+  corpus has 185 unique images among 1050 files), and a filename-level subset
+  then puts byte-identical content on both sides of any later train/val split.
+  Selection hashes the *prepped* array -- so re-encoded and rescaled-to-equal
+  duplicates are caught too -- and pulls replacements from the rest of the
+  pool, so ``num_sources`` distinct contents are staged or the shortfall is
+  reported.
 - After generation, per-source statistics are measured and written to
   ``stats.json``: single-frame PSNR (the "noisy enough" check, target roughly
   10-18 dB), avg-of-N PSNR vs clean, and the residual bias of the N-frame
@@ -23,6 +31,7 @@ Output layout under ``output_dir``::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import shutil
@@ -35,6 +44,7 @@ from PIL import Image
 
 from noising_pipeline import create_noisy_dataset
 
+from .data import content_key
 from .metrics import psnr
 
 SOURCE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
@@ -82,6 +92,80 @@ def select_sources(source_dir: str | Path, num_sources: int, seed: int) -> list[
     return selected
 
 
+def select_unique_sources(
+    source_dir: str | Path,
+    num_sources: int,
+    seed: int,
+    *,
+    grayscale: bool = True,
+    max_side: int | None = 512,
+    margin: float = 0.15,
+) -> tuple[list[Path], list[dict]]:
+    """Seeded subset of ``source_dir`` with duplicate CONTENT removed.
+
+    Candidates are visited in seeded-permutation order; a candidate whose
+    prepped array repeats one already accepted is skipped and the next
+    candidate takes its place, so ``num_sources`` *distinct* images are
+    returned whenever the pool holds that many. File bytes are hashed first as
+    a cheap prefilter, and the prepped array second so re-encoded duplicates
+    are caught as well.
+
+    Returns ``(paths in file order, skipped duplicate records)``. With a
+    duplicate-free pool this selects exactly what :func:`select_sources` does.
+    """
+    if num_sources < 1:
+        raise ValueError(f"num_sources must be >= 1, got {num_sources}")
+    root = Path(source_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"source_dir is not a directory: {root}")
+    files = _find_source_images(root)
+    order = np.random.RandomState(seed).permutation(len(files))
+
+    seen_files: dict[str, Path] = {}
+    seen_contents: dict[str, Path] = {}
+    chosen: list[int] = []
+    skipped: list[dict] = []
+    for position in order:
+        if len(chosen) >= num_sources:
+            break
+        path = files[int(position)]
+        relative = path.relative_to(root).as_posix()
+        file_key = hashlib.sha256(path.read_bytes()).hexdigest()
+        if file_key in seen_files:
+            skipped.append(
+                {
+                    "path": relative,
+                    "reason": "duplicate_file_bytes",
+                    "duplicate_of": seen_files[file_key].relative_to(root).as_posix(),
+                }
+            )
+            continue
+        seen_files[file_key] = path
+        prepped = _prep_clean_array(
+            path, grayscale=grayscale, max_side=max_side, margin=margin
+        )
+        key = content_key(prepped)
+        if key in seen_contents:
+            skipped.append(
+                {
+                    "path": relative,
+                    "reason": "duplicate_content",
+                    "duplicate_of": seen_contents[key].relative_to(root).as_posix(),
+                }
+            )
+            continue
+        seen_contents[key] = path
+        chosen.append(int(position))
+
+    if len(chosen) < num_sources:
+        warnings.warn(
+            f"requested {num_sources} sources but only {len(chosen)} distinct contents "
+            f"exist under {root} ({len(skipped)} duplicate(s) skipped); using all of them",
+            stacklevel=2,
+        )
+    return [files[index] for index in sorted(chosen)], skipped
+
+
 def _load_clean_array(path: Path, *, grayscale: bool) -> np.ndarray:
     """Decode any PIL-openable image to uint8 [H, W] (grayscale) or [H, W, 3]."""
     with Image.open(path) as image:
@@ -98,9 +182,10 @@ def _load_clean_array(path: Path, *, grayscale: bool) -> np.ndarray:
         return np.asarray(converted).copy()
 
 
-def _stage_clean_image(
-    source: Path, destination: Path, *, grayscale: bool, max_side: int | None, margin: float
-) -> tuple[int, int]:
+def _prep_clean_array(
+    source: Path, *, grayscale: bool, max_side: int | None, margin: float
+) -> np.ndarray:
+    """Decode + grayscale + downscale + margin pre-scale: exactly what is staged."""
     array = _load_clean_array(source, grayscale=grayscale)
     height, width = array.shape[:2]
     if max_side is not None and max(height, width) > max_side:
@@ -110,7 +195,13 @@ def _stage_clean_image(
         array = np.asarray(image).copy()
     normalized = array.astype(np.float64) / 255.0
     prescaled = margin + (1.0 - 2.0 * margin) * normalized
-    staged = np.rint(prescaled * 255.0).astype(np.uint8)
+    return np.rint(prescaled * 255.0).astype(np.uint8)
+
+
+def _stage_clean_image(
+    source: Path, destination: Path, *, grayscale: bool, max_side: int | None, margin: float
+) -> tuple[int, int]:
+    staged = _prep_clean_array(source, grayscale=grayscale, max_side=max_side, margin=margin)
     Image.fromarray(staged).save(destination, format="PNG")
     return staged.shape[0], staged.shape[1]
 
@@ -281,21 +372,32 @@ def generate_burst_dataset(
             )
         shutil.rmtree(output_root)
 
-    selected = select_sources(source_root, num_sources, select_seed)
+    selected, duplicates_skipped = select_unique_sources(
+        source_root, num_sources, select_seed,
+        grayscale=grayscale, max_side=max_side, margin=margin,
+    )
     staging_dir = output_root / "_sources"
     staging_dir.mkdir(parents=True)
     records = []
+    staged_keys: dict[str, str] = {}
     for index, source in enumerate(selected):
         staged_name = f"{index:05d}.png"
-        height, width = _stage_clean_image(
-            source, staging_dir / staged_name,
-            grayscale=grayscale, max_side=max_side, margin=margin,
+        prepped = _prep_clean_array(
+            source, grayscale=grayscale, max_side=max_side, margin=margin
         )
+        Image.fromarray(prepped).save(staging_dir / staged_name, format="PNG")
+        key = content_key(prepped)
+        if key in staged_keys:  # unreachable via select_unique_sources; a guard, not a path
+            raise RuntimeError(
+                f"staged duplicate content: {staged_name} repeats {staged_keys[key]}"
+            )
+        staged_keys[key] = staged_name
         records.append(
             {
                 "staged": staged_name,
                 "original": source.relative_to(source_root).as_posix(),
-                "staged_size": [height, width],
+                "staged_size": [prepped.shape[0], prepped.shape[1]],
+                "content_sha256": key,
             }
         )
 
@@ -314,7 +416,16 @@ def generate_burst_dataset(
         "noise_seed": noise_seed,
     }
     (output_root / "sources.json").write_text(
-        json.dumps({"settings": settings, "sources": records}, indent=2, sort_keys=True) + "\n",
+        json.dumps(
+            {
+                "settings": settings,
+                "sources": records,
+                "duplicates_skipped": duplicates_skipped,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -345,6 +456,8 @@ def generate_burst_dataset(
         "effective_noise_params": effective_params,
         "aggregate": aggregate,
         "per_source": per_source,
+        "unique_contents": len(staged_keys),
+        "duplicates_skipped": len(duplicates_skipped),
         "warnings": messages,
     }
     stats_path = output_root / "stats.json"

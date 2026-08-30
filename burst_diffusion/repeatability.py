@@ -91,6 +91,10 @@ def _mean_or_none(values: Sequence[float]) -> float | None:
     return float(np.mean(values)) if len(values) > 0 else None
 
 
+def _median_or_none(values: Sequence[float]) -> float | None:
+    return float(np.median(values)) if len(values) > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # global registration: sub-pixel translation via upsampled cross-correlation
 
@@ -380,6 +384,12 @@ def _new_accumulator() -> dict:
         "cd_biases": [],
         "cd_valid": 0,
         "cd_total": 0,
+        # Scene-level (per-source) statistics. Sites inside one source share the
+        # scene, the frames and the model outputs, so they are NOT independent
+        # experimental units -- site-pooled sigma over-weights whichever scene
+        # happens to yield the most sites. The independent unit is the source.
+        "cd_scene_sigmas": [],
+        "shift_scene_sigmas": [],
     }
 
 
@@ -425,9 +435,14 @@ def _accumulate_method(
         accumulator["shift_mean_vectors"].append(mean_vector)
         if count >= 2:
             deviations = shifts - mean_vector
-            accumulator["shift_ss"] += float((deviations**2).sum())
+            scene_ss = float((deviations**2).sum())
+            accumulator["shift_ss"] += scene_ss
             accumulator["shift_dof"] += 2 * (count - 1)
+            accumulator["shift_scene_sigmas"].append(
+                _pooled_sigma(scene_ss, 2 * (count - 1))
+            )
 
+    scene_cd_ss, scene_cd_dof = 0.0, 0
     cd_detail: list[dict] = []
     for site in sites:
         values = np.full(count, np.nan)
@@ -446,8 +461,11 @@ def _accumulate_method(
         if valid.sum() >= 2:
             kept_values = values[valid]
             kept_centers = centers[valid]
-            accumulator["cd_ss"] += float(((kept_values - kept_values.mean()) ** 2).sum())
+            site_ss = float(((kept_values - kept_values.mean()) ** 2).sum())
+            accumulator["cd_ss"] += site_ss
             accumulator["cd_dof"] += int(valid.sum()) - 1
+            scene_cd_ss += site_ss
+            scene_cd_dof += int(valid.sum()) - 1
             accumulator["center_ss"] += float(((kept_centers - kept_centers.mean()) ** 2).sum())
             accumulator["center_dof"] += int(valid.sum()) - 1
         cd_detail.append(
@@ -457,12 +475,17 @@ def _accumulate_method(
             }
         )
 
+    scene_cd_sigma = _pooled_sigma(scene_cd_ss, scene_cd_dof)
+    if scene_cd_sigma is not None:
+        accumulator["cd_scene_sigmas"].append(scene_cd_sigma)
+
     detail = {
         "psnr": [float(value) for value in accumulator["psnr"][-count:]],
         "shifts": (
             None if shifts is None else [[float(dy), float(dx)] for dy, dx in shifts]
         ),
         "pixel_sigma_mean": accumulator["pixel_sigma_means"][-1] if count >= 2 else None,
+        "cd_scene_sigma_px": scene_cd_sigma,
         "cd_sites": cd_detail,
     }
     return sigma_map, detail
@@ -501,6 +524,17 @@ def _summarize_method(accumulator: dict, sites_total: int) -> dict:
             ),
             "pooled_sigma_px": cd_sigma,
             "pooled_3sigma_px": None if cd_sigma is None else 3.0 * cd_sigma,
+            # Scene-level: the source is the independent unit, so this is the
+            # figure to compare methods on (site-pooled values over-weight
+            # site-rich scenes). Reported alongside, never instead.
+            "scene_sigmas_px": list(accumulator["cd_scene_sigmas"]),
+            "scene_median_sigma_px": _median_or_none(accumulator["cd_scene_sigmas"]),
+            "scene_median_3sigma_px": (
+                None
+                if not accumulator["cd_scene_sigmas"]
+                else 3.0 * float(np.median(accumulator["cd_scene_sigmas"]))
+            ),
+            "scenes": len(accumulator["cd_scene_sigmas"]),
             "bias_mean_px": _mean_or_none(accumulator["cd_biases"]),
             "bias_abs_mean_px": _mean_or_none([abs(b) for b in accumulator["cd_biases"]]),
             "center_pooled_sigma_px": _pooled_sigma(
@@ -509,6 +543,7 @@ def _summarize_method(accumulator: dict, sites_total: int) -> dict:
         },
         "registration": {
             "shift_sigma_px": _pooled_sigma(accumulator["shift_ss"], accumulator["shift_dof"]),
+            "scene_median_sigma_px": _median_or_none(accumulator["shift_scene_sigmas"]),
             "shift_bias_px": (
                 float(np.linalg.norm(shift_vectors.mean(axis=0)))
                 if shift_vectors.size
@@ -580,12 +615,19 @@ def _write_summary_markdown(results: dict, path: Path) -> None:
         f"registrable sources: {results['registration_sources']}/{results['count']} "
         f"(gate {results['registration_gate_px']} px)",
         "",
-        "All sigmas are c4-debiased pooled within-(source,site) values; units are",
-        "intensity in [0,1] for pixel sigma and pixels for CD/registration.",
+        "Sigmas are c4-debiased; units are intensity in [0,1] for pixel sigma and",
+        "pixels for CD/registration. **`CD 3sig scene` is the headline CD figure**:",
+        "the median of per-scene pooled 3-sigma values, because sites inside one",
+        "scene share frames and model outputs and are not independent units, so the",
+        "site-pooled column over-weights site-rich scenes. Bias is reported both",
+        "signed (systematic offset; opposite-sign sites cancel) and absolute (typical",
+        "per-site magnitude) -- they answer different questions and can differ by an",
+        "order of magnitude.",
         "",
-        "| method | K/src | PSNR dB | pixel sigma x1e-3 | CD 3sigma px | CD bias px "
-        "| CD success | center sigma px | shift sigma px | shift bias px |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| method | K/src | PSNR dB | pixel sigma x1e-3 | CD 3sig scene px | CD 3sig sites px "
+        "| CD bias px | CD abs-bias px | CD success | center sigma px | shift sigma px "
+        "| shift bias px |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, method in results["methods"].items():
         realizations = method["realizations_per_source"]
@@ -594,20 +636,29 @@ def _write_summary_markdown(results: dict, path: Path) -> None:
         cd = method["cd"]
         registration = method["registration"]
         lines.append(
-            "| {name} | {k} | {psnr} | {pixel} | {cd3} | {cdbias} | {success} "
-            "| {center} | {shift} | {shiftbias} |".format(
+            "| {name} | {k} | {psnr} | {pixel} | {cdscene} | {cd3} | {cdbias} | {cdabs} "
+            "| {success} | {center} | {shift} | {shiftbias} |".format(
                 name=name,
                 k=k_text,
                 psnr=_format(method["accuracy"]["psnr_mean"], ".2f"),
                 pixel=_format(None if pixel is None else pixel["sigma_mean"], ".2f", 1e3),
+                cdscene=_format(cd["scene_median_3sigma_px"], ".3f"),
                 cd3=_format(cd["pooled_3sigma_px"], ".3f"),
                 cdbias=_format(cd["bias_mean_px"], "+.3f"),
+                cdabs=_format(cd["bias_abs_mean_px"], ".3f"),
                 success=_format(cd["success_rate"], ".1%"),
                 center=_format(cd["center_pooled_sigma_px"], ".3f"),
                 shift=_format(registration["shift_sigma_px"], ".3f"),
                 shiftbias=_format(registration["shift_bias_px"], ".3f"),
             )
         )
+    lines.append("")
+    lines.append(
+        f"Per-scene CD 3-sigma values back the scene column "
+        f"(n = {results['methods'][next(iter(results['methods']))]['cd']['scenes']} scenes "
+        "with >= 1 measurable site); see `repeatability.json` -> "
+        "`methods.<name>.cd.scene_sigmas_px`."
+    )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -647,8 +698,8 @@ def repeatability(
     (e.g. a near-featureless crop where the correlation peak wanders), and is
     excluded from the shift statistics of every method identically.
     """
-    if split not in ("val", "train"):
-        raise ValueError(f"split must be 'val' or 'train', got {split!r}")
+    if split not in ("val", "train", "test"):
+        raise ValueError(f"split must be 'val', 'train', or 'test', got {split!r}")
     if num_seeds < 1:
         raise ValueError(f"num_seeds must be >= 1, got {num_seeds}")
     if not checkpoints:
@@ -672,9 +723,10 @@ def repeatability(
         min_replicas=min_replicas(config.schedule.num_steps),
         min_size=config.data.image_size,
         val_fraction=config.data.val_fraction,
+        test_fraction=config.data.test_fraction,
         split_seed=config.data.split_seed,
     )
-    sources = cache.val_sources if split == "val" else cache.train_sources
+    sources = cache.sources_for_split(split)
     if not sources:
         raise ValueError(f"no sources in the {split!r} split")
     if limit is not None:

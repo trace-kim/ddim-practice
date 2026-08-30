@@ -7,7 +7,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from burst_diffusion.generate import generate_burst_dataset, select_sources
+from burst_diffusion.data import content_key
+from burst_diffusion.generate import (
+    _prep_clean_array,
+    generate_burst_dataset,
+    select_sources,
+    select_unique_sources,
+)
 from burst_diffusion.preview import make_preview_grid
 
 
@@ -117,6 +123,70 @@ def test_requesting_more_sources_than_available_warns_and_uses_all(tmp_path: Pat
     with pytest.warns(UserWarning, match="using all of them"):
         selected = select_sources(source_dir, 5, seed=0)
     assert len(selected) == 2
+
+
+def _write_duplicate_pool(root: Path, *, unique: int, copies: int) -> Path:
+    """A pool where every unique image also appears under other filenames --
+    the real MIIC corpus shape (185 unique contents across 1050 files)."""
+    source_dir = root / "dup_sources"
+    for index in range(unique):
+        gradient = np.linspace(0, 255, 12 * 9, dtype=np.float64).reshape(12, 9)
+        array = np.rint((gradient + index * 7) % 256).astype(np.uint8)
+        for copy in range(copies):
+            _save_image(source_dir / f"img_{index}_copy{copy}.png", array)
+    return source_dir
+
+
+def test_selection_deduplicates_content_and_reports_what_it_skipped(tmp_path: Path) -> None:
+    source_dir = _write_duplicate_pool(tmp_path, unique=6, copies=4)
+    selected, skipped = select_unique_sources(source_dir, 6, seed=0, max_side=None)
+    assert len(selected) == 6
+    keys = {content_key(_prep_clean_array(p, grayscale=True, max_side=None, margin=0.15))
+            for p in selected}
+    assert len(keys) == 6, "selection returned duplicate content"
+    assert skipped, "duplicates were skipped but not reported"
+    assert {record["reason"] for record in skipped} <= {
+        "duplicate_file_bytes",
+        "duplicate_content",
+    }
+    # The plain selector is the contrast: it picks by filename and duplicates.
+    plain = select_sources(source_dir, 6, seed=0)
+    plain_keys = {
+        content_key(_prep_clean_array(p, grayscale=True, max_side=None, margin=0.15))
+        for p in plain
+    }
+    assert len(plain_keys) < 6
+
+
+def test_selection_warns_when_the_pool_lacks_enough_distinct_content(tmp_path: Path) -> None:
+    source_dir = _write_duplicate_pool(tmp_path, unique=2, copies=5)
+    with pytest.warns(UserWarning, match="only 2 distinct contents"):
+        selected, skipped = select_unique_sources(source_dir, 8, seed=0, max_side=None)
+    assert len(selected) == 2
+    assert len(skipped) == 8
+
+
+def test_generated_dataset_has_no_duplicate_clean_content(tmp_path: Path) -> None:
+    """End-to-end leakage guard: a duplicate-ridden corpus must still yield a
+    dataset of distinct scenes, so no later split can leak content."""
+    source_dir = _write_duplicate_pool(tmp_path, unique=4, copies=3)
+    with pytest.warns(UserWarning):  # tiny images make the PSNR bands noisy
+        stats_path = _generate(tmp_path, source_dir=source_dir, num_sources=4)
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    assert stats["unique_contents"] == 4
+    assert stats["duplicates_skipped"] > 0
+
+    clean_dir = tmp_path / "out" / "burst" / "clean"
+    hashes = {
+        content_key(np.asarray(Image.open(path).convert("L")))
+        for path in sorted(clean_dir.glob("*.png"))
+    }
+    assert len(hashes) == 4
+
+    sources = json.loads((tmp_path / "out" / "sources.json").read_text(encoding="utf-8"))
+    recorded = [record["content_sha256"] for record in sources["sources"]]
+    assert len(set(recorded)) == len(recorded) == 4
+    assert sources["duplicates_skipped"]
 
 
 def test_existing_output_requires_overwrite(tmp_path: Path) -> None:

@@ -1,0 +1,45 @@
+# Step-matched control for miic_p10_dedup_rollout.yml: the SAME 10,000
+# additional steps as the rollout finetune, but ordinary training (no rollout
+# block), so any rollout gain cannot be explained by the extra steps alone.
+# Launch from the same baseline checkpoint:
+#   python -m burst_diffusion train --config configs/burst_diffusion/miic_p10_dedup_cont40k.yml `
+#     --resume-from runs/burst_diffusion/miic_p10_dedup/ckpt_latest.pt
+# Honest label: STEP-matched, not FLOP- or wall-time-matched. A rollout step
+# costs ~3.8x a plain step (it runs a no-grad sampler trajectory), so the
+# rollout arm consumes more compute for the same step count; this control
+# isolates "more gradient steps", not "more compute".
+data:
+  dataset_dir: data/MIIC-burst-p10-dedup
+  image_size: 64
+  channels: 1
+  val_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 2019
+schedule:
+  num_steps: 15
+  target_mode: fresh
+model:
+  ch: 64
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  dropout: 0.0
+  resamp_with_conv: true
+training:
+  run_dir: runs/burst_diffusion/miic_p10_dedup_cont40k
+  batch_size: 8
+  max_steps: 40000
+  lr: 0.0002
+  grad_clip: 1.0
+  ema: true
+  ema_rate: 0.999
+  antithetic: true
+  seed: 0
+  device: auto
+  log_every: 50
+  val_every: 1000
+  val_images: 8
+  checkpoint_every: 2000
+sampling:
+  output_mode: both
+  num_sample_steps: null

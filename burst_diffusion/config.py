@@ -25,7 +25,17 @@ class DataConfig(_StrictModel):
     image_size: int = Field(default=64, ge=8)
     channels: Literal[1, 3] = 1
     val_fraction: float = Field(default=0.1, ge=0.0, lt=1.0)
+    test_fraction: float = Field(default=0.0, ge=0.0, lt=1.0)
     split_seed: int = Field(default=2019, ge=0)
+
+    @model_validator(mode="after")
+    def _check_holdout_fractions(self) -> "DataConfig":
+        if self.val_fraction + self.test_fraction >= 1.0:
+            raise ValueError(
+                f"data.val_fraction + data.test_fraction must be < 1, got "
+                f"{self.val_fraction} + {self.test_fraction}"
+            )
+        return self
 
 
 class ScheduleConfig(_StrictModel):

@@ -189,8 +189,8 @@ def evaluate(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     """Run the five-baseline evaluation; writes results.json + a comparison grid."""
-    if split not in ("val", "train"):
-        raise ValueError(f"split must be 'val' or 'train', got {split!r}")
+    if split not in ("val", "train", "test"):
+        raise ValueError(f"split must be 'val', 'train', or 'test', got {split!r}")
     sampler = Sampler.from_checkpoint(
         checkpoint, device=device if device is not None else config.training.device
     )
@@ -205,9 +205,10 @@ def evaluate(
         min_replicas=min_replicas(config.schedule.num_steps),
         min_size=config.data.image_size,
         val_fraction=config.data.val_fraction,
+        test_fraction=config.data.test_fraction,
         split_seed=config.data.split_seed,
     )
-    sources = cache.val_sources if split == "val" else cache.train_sources
+    sources = cache.sources_for_split(split)
     if not sources:
         raise ValueError(f"no sources in the {split!r} split")
     if limit is not None:
