@@ -61,6 +61,25 @@ data/BBBC038-burst-p10/
 Out-of-band values print warnings with the suggested fix (raise `--margin`,
 change `--peak`/`--gaussian-std`, add replicas). A `salt_pepper` warning means
 the MSE objective will converge to a biased limit — use it only knowingly.
+Also check `unique_contents` == `--num-sources` and see how many
+`duplicates_skipped` the corpus contained.
+
+### Content deduplication (why your corpus probably needs it)
+
+Selection is **content-deduplicated**: candidates are visited in seeded order,
+the *prepped* array is hashed (catching re-encoded and rescaled-to-equal
+duplicates, not just identical bytes), and a repeat is skipped in favor of the
+next candidate. This is not hypothetical hygiene — the reference MIIC corpus
+ships **185 unique images across 1050 files**, so filename-level selection of
+96 sources yielded only 68 distinct scenes and put byte-identical content on
+both sides of the split (report §9.1). `sources.json` records each source's
+`content_sha256` plus every skipped duplicate.
+
+`BurstCache` independently enforces the same invariant at *split* time:
+sources whose clean images hash equal move together, so no content can appear
+in both train and a holdout even in an older dataset (you get a warning
+naming the duplicate groups). With all-distinct content this is exactly the
+plain index split, so existing clean datasets keep their historical splits.
 
 ### Choosing T and N
 
@@ -94,7 +113,8 @@ Config reference (`configs/burst_diffusion/*.yml`; unknown keys are rejected):
 | `data.dataset_dir` | dataset root (or its `burst/` subdir) |
 | `data.image_size` | training crop size; must divide by 2^(levels−1); sources smaller than this are dropped |
 | `data.channels` | 1 or 3; grayscale bursts should use 1 |
-| `data.val_fraction`, `data.split_seed` | held-out split, **by source**, deterministic |
+| `data.val_fraction`, `data.split_seed` | development holdout, **by content group**, deterministic |
+| `data.test_fraction` | locked test holdout (default 0). Anchored at the end of the group permutation, so changing `val_fraction` never moves it — keep it untouched until final reporting, then `evaluate --split test` once |
 | `schedule.num_steps` | T; every kept source needs ≥ T+1 frames |
 | `schedule.target_mode` | `fresh` (real training) — `included` is a documented-degenerate ablation and warns |
 | `model.ch`, `ch_mult`, `num_res_blocks`, `attn_resolutions` | U-Net size; keep attention ≤ 16; `ch` must divide by `num_groups` (default min(32, ch)) |
@@ -224,8 +244,12 @@ realization, so it reports accuracy and bias but no precision). Outputs
 - **CD (critical dimension)** — edge pairs measured CD-SEM-style (16-row band
   profile, 50% threshold between robust profile extremes, subpixel
   linear-interpolated crossings) on fixed sites auto-selected from the clean
-  image; pooled sigma/3-sigma across (source, site), bias vs the clean-image
-  CD, and measurement success rate;
+  image; bias vs the clean-image CD (signed *and* absolute — opposite-sign
+  sites cancel in the signed mean), measurement success rate, and two sigmas:
+  **`CD 3sig scene`, the median of per-scene pooled values, is the one to
+  compare methods on** — sites inside a scene share frames and model outputs
+  and are not independent units, so the site-pooled column over-weights
+  site-rich scenes (this distinction reversed a headline once — report §9.1);
 - **registration** — feature-center precision from the same sites, plus
   global sub-pixel image shift vs clean (upsampled cross-correlation),
   precision and bias.
@@ -235,7 +259,15 @@ its own all-frame average lands > 0.5 px, i.e. a near-featureless crop that
 nothing can register against — are excluded from the shift statistics of
 every method identically (`registrable sources` in the summary header).
 `--seeds 10` and the full sampling schedule are the defaults; `--steps K`
-switches to the accelerated sampler.
+switches to the accelerated sampler; `--split test` reads the locked holdout.
+
+Two interpretation warnings worth repeating, both learned the hard way:
+repeatability is **necessary but not sufficient** for metrological validity —
+a model can be perfectly repeatable by stably suppressing or hallucinating
+structure, so read CD bias and success rate next to CD sigma; and include the
+**step-matched control arm** (a plain continuation to the same step count)
+whenever you attribute a precision gain to rollout finetuning, since part of
+it is ordinary extra training.
 
 ## 6. Real equipment data (no clean images)
 

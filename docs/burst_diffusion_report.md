@@ -7,7 +7,8 @@
 - A network trained only on noisy burst frames (never a clean image) reconstructs, **from one fast noisy acquisition**, an image **9–11.5 dB cleaner than averaging all 16 burst frames** — on both fluorescence microscopy and SEM data.
 - The training loss converged to within 3% of the theoretically predicted noise floor, confirming the math behind the method.
 - One honest negative: the DDIM-style iterative sampler did not beat the single forward pass. The cause is understood (a train/inference distribution gap, predicted in advance) and the fix is known. **Update 2026-08-30: the fix (self-rollout finetuning) is implemented and worked — iteration now beats the single forward pass on both datasets (§8).**
-- **Metrology repeatability (§9):** re-measuring the same area with 10 fresh frames, the model's outputs move ~10× less per pixel than 8-frame averaging, and on SEM data the critical-dimension 3σ from *one* frame (0.80 px) beats 8-frame averaging (1.43 px). Iteration's real payoff turns out to be precision, not PSNR: the iterated prediction beats one-shot on every repeatability metric. Two costs found: a small systematic placement bias (~0.1–0.25 px) and content dependence (on soft fluorescence edges, classical avg-of-8 still has the better CD 3σ).
+- **Metrology repeatability (§9):** re-measuring the same area with 10 fresh frames, the model's outputs move ~10× less per pixel than 8-frame averaging, and the iterated prediction is the most repeatable output on every pixel-level and registration measure (MIIC). **Correction (2026-08-30, §9.1):** an earlier version of this section claimed one-frame CD repeatability *beat* 8-frame averaging (0.80 vs 1.43 px). That claim was withdrawn — it came from a leaked, site-pooled comparison; on content-disjoint scenes avg-of-8 is level with or ahead of the model on CD. Costs: a systematic placement bias (~0.1–0.25 px) and strong content dependence.
+- **Leakage correction (§9.1):** the MIIC source corpus ships each image under several filenames (185 unique among 1050 files), so the original MIIC dataset held 68 distinct scenes among 96 sources and 6 of 10 "held-out" sources had a byte-identical training twin. Generation is now content-deduplicated, splitting is content-group-aware, a locked test split exists, and **all MIIC arms were retrained from scratch** (§9.2). BBBC038 was never affected (96/96 unique).
 
 ## 1. What we set out to test
 
@@ -28,9 +29,12 @@ predictions into a running average, exactly as if they were extra acquisitions.
 
 A key property falls out of the math (see the method doc): the optimal
 predictor of a held-out noisy frame is the *clean image estimate* — so the
-network learns to denoise **without ever seeing a clean image**. That means the
-identical pipeline trains on real equipment bursts where no ground truth
-exists.
+network learns to denoise **with no clean target anywhere in the training
+loss**. That means the identical pipeline trains on real equipment bursts where
+no ground truth exists. (Precisely: the *optimization* never sees a clean
+image. These synthetic experiments still use clean images all around the loop —
+validation monitoring, evaluation, CD-site selection, the registration
+reference — so the honest claim is about the loss, not about the project.)
 
 ## 2. The pipeline at a glance
 
@@ -55,7 +59,7 @@ clipping bias):
 
 | | BBBC038 (fluorescence microscopy) | MIIC (integrated-circuit SEM) |
 |---|---|---|
-| clean sources | 96 (of 670, CC0) | 96 (NTU MIIC, doi:10.21979/N9/WBLTFI, CC BY-NC 4.0) |
+| clean sources | 96 (of 670, CC0) — 96 **distinct** | 96 (NTU MIIC, doi:10.21979/N9/WBLTFI, CC BY-NC 4.0) — only **68 distinct**, see §9.1 |
 | frames per source (N) | 16 | 16 |
 | single-frame PSNR (median) | 17.3 dB | 14.2 dB |
 | PSNR of avg-of-16 vs clean | 29.3 dB | 26.2 dB |
@@ -74,7 +78,13 @@ system commit charge, which other running apps had nearly exhausted.)
 ## 4. Results
 
 Held-out validation sources (10 per dataset), mean PSNR / SSIM vs clean.
-Everything below `avg_of_n` uses **only one noisy frame** as input:
+Everything below `avg_of_n` uses **only one noisy frame** as input.
+
+> **MIIC column contaminated (§9.1):** 6 of these 10 MIIC sources have a
+> byte-identical training twin, so the MIIC column measures seen-scene /
+> fresh-noise performance. Retrained deduplicated MIIC results are in §9.2;
+> the BBBC038 column is unaffected. Means are also skewed by a few near-flat
+> crops — BBBC038 one-shot has median 37.9 dB against its 40.2 dB mean.
 
 | Method | BBBC038 | MIIC SEM |
 |---|---|---|
@@ -131,17 +141,40 @@ curve).
 - At effective Poisson peak 10, the very brightest pixels are slightly dimmed by
   the noise pipeline's clipping (worst-case per-pixel bias ~0.05); image-mean
   bias is ≤0.0024 and the model and the averaging baseline are affected
-  identically, so comparisons stay fair.
+  identically, so comparisons stay fair. Note the check is a *whole-image mean*,
+  in which opposite-signed local biases cancel — a per-intensity-bin readout
+  would bound the local bias properly (open item).
 - 10 validation sources per dataset; T=15/N=16 is the minimum configuration
   (T=31/N=32 is a config-only regeneration).
+- **One training seed per arm, and one split seed.** No seed-replication study
+  has been run, so effect sizes below ~0.5 dB should be treated as provisional.
+- **The headline compares against frame averaging only.** Missing: an
+  equal-capacity single-level Noise2Noise model (which would isolate what the
+  *schedule* contributes over plain N2N), a clean-supervised oracle (the upper
+  bound), and a classical Poisson denoiser such as Anscombe + BM3D. The
+  9–11.5 dB headline is a learned prior beating frame integration; it is not
+  evidence of a *diffusion*-specific advantage, since one-shot — the source of
+  that headline — is a single forward pass, not iterative diffusion.
+- The `avg_of_n` reference is weak on PSNR specifically: a fixed Gaussian blur
+  already beats avg-of-16 there (§9.1) while ruining CD.
 
 ## 7. Next steps
 
 1. ~~Self-rollout finetuning to close the iteration gap.~~ Done — §8.
-2. T=31 / N=32 regeneration and re-run (config-only, ~30 min).
-3. Real SEM burst ingestion (a small manifest-builder; the loader already
-   accepts the layout) + drift/registration checking.
-4. Full-image tiled benchmarking and larger patches (128px fits this GPU).
+2. ~~Content-deduplicated MIIC regeneration + retrain of all arms.~~ Done —
+   §9.1/§9.2.
+3. Matched baselines: single-level Noise2Noise at equal capacity, a
+   clean-supervised oracle, and Anscombe+BM3D — the comparison that would turn
+   "beats frame averaging" into "beats the alternatives".
+4. Multiple training and split seeds; report medians, paired CIs and
+   source-clustered statistics rather than site-pooled means.
+5. Real SEM burst ingestion (a small manifest-builder; the loader already
+   accepts the layout) + drift/registration checking, with CD in physical units.
+6. Full-image tiled benchmarking and larger patches (128px fits this GPU).
+7. T=31 / N=32 regeneration and re-run (config-only, ~30 min).
+8. Provenance: run the burst arms through the `ddimctl` bundle machinery
+   (source snapshot, dataset/checkpoint hashes, environment lock, exact
+   invocation) instead of ad-hoc run directories.
 
 ## 8. Follow-up experiment: self-rollout finetuning (2026-08-30)
 
@@ -156,7 +189,9 @@ on the fly with the EMA weights (the inference distribution), at
 the same RTX 4060 Ti).
 
 Same held-out sources and protocol as §4; baseline numbers repeated for
-comparison:
+comparison. (**MIIC columns contaminated — §9.1**; the BBBC038 columns stand,
+except that the rollout-vs-one-shot margin is p = 0.0501, i.e. suggestive
+rather than established.)
 
 | Method | BBBC038 base | BBBC038 finetuned | MIIC base | MIIC finetuned |
 |---|---|---|---|---|
@@ -197,7 +232,12 @@ validation-set means above are the honest readout.
 **Control: is it the rollout, or just 10k more steps?** Because the
 finetuned models received 10,000 *additional* gradient steps, a plain
 continuation of each baseline to 40k (identical config, no `rollout`
-block, same resume) was trained as the equal-compute control:
+block, same resume) was trained as the **step-matched** control. Note the
+label carefully: it matches gradient *steps*, not compute — a rollout step
+costs ~3.8× a plain step (each runs a no-grad sampler trajectory), so the
+rollout arm consumed roughly 3.8× the additional FLOPs. This control
+therefore rules out "more gradient steps", not "more compute"; a
+FLOP-matched control (≈38k plain steps) has not been run.
 
 | iter_prediction (PSNR) | BBBC038 | MIIC |
 |---|---|---|
@@ -230,6 +270,14 @@ iterative outputs matter (they are now the best ones), the trade is
 clearly favorable.
 
 ## 9. Repeatability & metrology evaluation (2026-08-30)
+
+> **Read §9.1 first.** An internal audit found that the MIIC dataset used in
+> §4, §8 and in the tables below contains duplicated source content, so its
+> "held-out" sources were partly seen in training, and that the CD headline
+> below does not survive a scene-level reanalysis. The affected claims are
+> corrected in §9.1 and the retrained, deduplicated results are in §9.2. The
+> tables in this subsection are retained verbatim as the record of what was
+> originally measured, not as current claims.
 
 Everything above scores *accuracy* (PSNR/SSIM against clean). For metrology
 the more important axis is *repeatability*: measure the same area again and
@@ -346,3 +394,139 @@ the explicit caveat that soft-edged content (BBBC038) keeps classical
 averaging competitive on CD. Next data-side step unchanged from §7: real
 SEM bursts, where fixed-pattern noise (correlated across frames, §6 of the
 method doc) is the assumption most likely to move these numbers.
+
+*(Findings 2, 4, 7 and 8 and this practical summary are superseded by §9.1;
+findings 1, 3, 5 and 6 survive the reanalysis. Read on.)*
+
+## 9.1 Audit and corrections (2026-08-30)
+
+An internal audit of the whole experimental record found two defects that
+invalidate specific claims above. Both were verified independently before
+being accepted, and the fixes are in the code, not only in prose.
+
+### Defect 1: duplicated source content in the MIIC datasets
+
+The MIIC source corpus (`paired_miic_v0/train/target_sem`) contains **185
+unique images among 1050 files** — the same picture is shipped under several
+filenames. `generate` selected sources by filename, so the 96 staged MIIC
+sources held only **68 distinct scenes**, and `BurstCache` split by source
+*index*, so duplicated content landed on both sides. Six of the ten reported
+MIIC validation sources (12, 15, 16, 24, 31, 37) had a byte-identical
+training twin; only 29, 62, 72 and 88 were genuinely unseen. The noisy
+frames differ, so this is *seen-scene / fresh-noise* leakage rather than
+outright train-on-test, but every MIIC held-out number in §4, §8 and §9 is
+affected and none of them measures unseen-content generalization.
+
+The same defect is worse in the older `ddimctl` SEM run
+(`runs/2026-08-24/...__sem-ddim-local-32-full__...`): 1050 files with 185
+unique contents split by file index, so **every** validation file has an
+exact training duplicate (and the upstream corpus's own nominal val/test
+directories overlap its train directory completely). That run stands as a
+workflow demonstration only; its validation loss is not evidence of
+generalization. It was never a denoising experiment (unconditional DDPM,
+Gaussian-noise prediction), so no denoising claim rests on it.
+
+**Fixed in code, with regression tests:**
+
+- `generate` now **content-deduplicates before selection**
+  (`select_unique_sources`): candidates are visited in seeded order, the
+  prepped array is hashed (so re-encoded duplicates are caught too), and a
+  duplicate is skipped in favor of the next candidate. `sources.json` records
+  every source's `content_sha256` and every skipped duplicate; `stats.json`
+  reports `unique_contents`.
+- `BurstCache` now splits by **content group**, never by index: sources whose
+  clean images hash equal move together, and a duplicated dataset warns. With
+  all-distinct content this reduces exactly to the previous index
+  permutation, so BBBC038's split — and every BBBC038 number in this report —
+  is unchanged and reproducible.
+- A **locked test split** (`data.test_fraction`) is anchored at the end of
+  the group permutation, so widening `val_fraction` during development can
+  never move it.
+- Tests assert no content crosses a split, that a duplicate-ridden corpus
+  still yields a distinct-scene dataset, and that `test_fraction: 0`
+  reproduces the historical split.
+
+**BBBC038 is unaffected** (96 files, 96 unique contents), which the same
+hash audit confirms; its results stand as reported.
+
+### Defect 2: the CD headline does not survive a scene-level reanalysis
+
+§9 finding 4 claimed the model's one-frame CD 3σ (0.797 px) beats
+8-frame averaging (1.434 px) on MIIC. That comparison pools **sites**, but
+sites inside one scene share the scene, the frames and the model outputs, so
+they are not independent experimental units; the independent unit is the
+source. Only 5 of 10 MIIC scenes yielded CD sites, and 14 of 21 sites came
+from *leaked* scenes. Recomputing per scene from the saved measurements:
+
+| scene | status | sites | avg-8 CD 3σ | model CD 3σ | winner |
+|---|---|---|---|---|---|
+| 16 | leaked | 6 | 2.647 | 0.972 | model |
+| 24 | leaked | 4 | 0.723 | 0.643 | model |
+| 29 | **unseen** | 4 | 0.432 | 0.774 | avg-8 |
+| 31 | leaked | 4 | 0.375 | 0.436 | avg-8 |
+| 88 | **unseen** | 3 | 0.438 | 1.001 | avg-8 |
+
+The model wins 2 of 5 scenes, both leaked; avg-8 wins both genuinely unseen
+scenes. Pooled over the unseen scenes only, avg-8 is 0.420 px vs the model's
+0.875 px. The site-pooled headline was carried by leaked scene 16, where
+avg-8 happened to draw a large σ on 6 degrees of freedom. An independent
+re-evaluation on 32 content-disjoint MIIC scenes agrees: avg-8 0.537 px vs
+rollout 0.574 px.
+
+**The claim "one-frame CD repeatability beats 8-frame averaging" is
+withdrawn.** What the evidence supports is that one-frame CD repeatability
+is *comparable to* 8-frame averaging (and clearly better than 4-frame),
+which is still a strong result for a single acquisition — but it is not
+superiority, and it is not what was claimed.
+
+**Fixed in code:** `repeatability` now computes and reports per-scene pooled
+sigmas (`cd.scene_sigmas_px`), their median (`cd.scene_median_3sigma_px`),
+and makes the **scene-level median the headline column** in `summary.md`,
+with the site-pooled value retained beside it. The registration section
+gained the same scene-level median.
+
+### Other corrections applied
+
+- **"Every repeatability metric"** (finding 2, and the earlier TL;DR) was
+  false as stated: it holds on MIIC but not on BBBC038, where iteration's
+  shift σ is 0.498 vs one-shot's 0.483 px. Scoped to MIIC.
+- **Bias tables displayed only the signed mean**, in which opposite-sign
+  sites cancel: MIIC rollout CD bias reads +0.028 px signed but 0.224 px
+  mean-absolute (BBBC038: −0.049 vs 0.496). Both are now shown — they answer
+  different questions (systematic offset vs typical per-site magnitude), and
+  finding 5's "model bias ≈ averaging bias" is a statement about the *signed*
+  column only.
+- **The §8 rollout-vs-one-shot margin on BBBC038 is not significant** at the
+  conventional threshold: +0.667 dB, paired 95% CI [−0.0004, 1.335],
+  p = 0.0501, n = 10. Reported as suggestive, not established. (The much
+  larger effect — rollout repairing iteration itself, +6.5 dB, 10/10 sources
+  — is unaffected.)
+- **The repeatability comparison omitted the step-matched 40k controls.**
+  Adding them shows part of what §9 finding 8 attributed to rollout is plain
+  continuation: MIIC iter-pred pixel σ 6.51 → 6.34 (plain) → 6.06 (rollout)
+  ×10⁻³, CD site-pooled 3σ 0.862 → 0.842 → 0.797, shift σ 0.163 → 0.164 →
+  0.170 (rollout marginally *worse* on shift). Rollout-specific gains are
+  real but smaller than the baseline→rollout tables implied.
+- **PSNR means are skewed by near-flat crops.** BBBC038 baseline one-shot has
+  mean 40.2 dB but median 37.9 dB, lifted by three ~49–51 dB crops. Medians
+  should accompany means.
+- **Frame averaging is not a strong PSNR baseline.** A fixed Gaussian blur of
+  the *single* frame (σ swept over 0.8–2.2 on the same validation center
+  crops; best is σ = 2.2) reaches 32.5 dB (BBBC038) / 27.9 dB (MIIC) —
+  *above* avg-of-16's 28.7 / 26.2 — while destroying exactly the edges CD
+  measures. This does not threaten the model's margin (35–40 dB), but it does
+  mean `avg_of_n` alone is too weak a reference for a PSNR headline: the
+  honest comparison needs a denoiser-class baseline (Anscombe + BM3D) and an
+  equal-capacity single-level Noise2Noise model, which would also isolate
+  what the *schedule* adds over plain N2N (§7 item 3).
+- **"No clean image is ever used"** overstated the self-supervision claim and
+  is now "no clean target in the training loss" throughout (§2, method doc
+  §3). Clean images are used for monitoring, evaluation, CD-site selection
+  and the registration reference.
+- **Repeatability is necessary, not sufficient, for metrological validity.** A
+  model can be repeatable by stably suppressing or hallucinating structure.
+  The CD sites here are oracle-selected from the clean image, the scale is
+  pixels rather than physical units, and "3σ" is a convention, not a tested
+  Gaussianity claim. Finding 7 (edge-concentrated residual variance) is the
+  reason pixel-mean σ flatters the model, and its last sentence ("Even so,
+  the model wins CD 3σ on MIIC") is withdrawn with defect 2.

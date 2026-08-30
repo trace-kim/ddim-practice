@@ -113,7 +113,13 @@ the learned family. The `fresh` requirement $K \notin S$ *is* Noise2Noise's
 independence condition — input and target must not share noise realizations —
 and Theorem 2 shows exactly what happens in the averaging setting when it is
 violated. Practically: **training toward noisy targets converges to the
-clean-image estimator, so no clean image is ever needed for training.**
+clean-image estimator, so no clean target is ever needed in the training
+loss.** State that precisely: the *optimization* never sees a clean image, so
+the method transfers to real equipment where no ground truth exists. Clean
+images are nonetheless used everywhere *around* the loop in these synthetic
+experiments — validation monitoring, evaluation, CD-site selection, the
+registration reference — so "no clean image is ever used" would be an
+overstatement.
 Because the cleanest level averages $T$ frames and the fresh target must lie
 outside that subset, $N \ge T+1$.
 
@@ -392,10 +398,11 @@ BBBC038 gap. In the five-baseline evaluation the goal condition
 `iter_prediction` $\ge$ `one_shot` now holds on both datasets
 (BBBC038 40.54 vs 39.87 dB; MIIC 35.94 vs 35.56 dB — see the
 [report](burst_diffusion_report.md) §8 for full tables and the per-source
-breakdown). An equal-compute control — each baseline plainly continued to
+breakdown). A **step-matched** control — each baseline plainly continued to
 40k steps with no rollout — leaves `iter_prediction` unchanged
 (34.00 → 33.81 / 35.25 → 35.27 dB), attributing the improvement to the
-rollout mechanism rather than to the extra training (report §8). Per source, the baseline's catastrophic cases vanished: the
+rollout mechanism rather than to the extra gradient steps (report §8). It is
+step-matched, not FLOP-matched: rollout steps cost ~3.8× more. Per source, the baseline's catastrophic cases vanished: the
 worst was a 50.1 dB one-shot iterated *down* to 30.8 dB, which finetuning
 turned into 51.2 dB — iterating now matches or beats one-shot on every
 validation source.
