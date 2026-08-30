@@ -269,6 +269,22 @@ structure, so read CD bias and success rate next to CD sigma; and include the
 whenever you attribute a precision gain to rollout finetuning, since part of
 it is ordinary extra training.
 
+### Recording what produced a run
+
+```powershell
+python -m burst_diffusion provenance --config configs/burst_diffusion/miic_p10_dedup.yml `
+  --command "python -m burst_diffusion train --config configs/burst_diffusion/miic_p10_dedup.yml"
+```
+
+Writes `provenance.json` into the run directory: git commit / branch /
+dirty-file list plus a hash of the diff (the diff itself is never stored), a
+**dataset content digest** with the distinct-content count and the exact
+train/val/test split, the checkpoint's SHA-256 and step, and
+python/torch/CUDA/GPU. Run it after training finishes (it fingerprints
+`ckpt_latest.pt` by default) — a report that cites a run should be able to
+name the commit and dataset digest behind it. The dataset digest is what
+catches a dataset quietly gaining or changing content between runs.
+
 ## 6. Real equipment data (no clean images)
 
 Training never uses clean images, so real bursts work directly:
