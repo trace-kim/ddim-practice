@@ -111,6 +111,41 @@ def test_dataset_fingerprint_detects_a_content_change(tmp_path: Path) -> None:
     assert duplicated["duplicate_groups"]
 
 
+def test_git_state_survives_a_non_ascii_diff(tmp_path: Path) -> None:
+    """Regression: `subprocess(text=True)` decodes with the SYSTEM locale, so a
+    diff containing typographic characters (a report full of sigma/minus signs)
+    raised UnicodeDecodeError on a cp949/cp1252 console and left stdout None."""
+    import subprocess
+
+    from burst_diffusion.provenance import git_state
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, check=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+    tracked = repo / "doc.md"
+    tracked.write_text("plain ascii\n", encoding="utf-8")
+    run("git", "add", "doc.md")
+    run("git", "commit", "-qm", "init")
+    # Uncommitted change with characters outside the Windows ANSI codepages.
+    tracked.write_text("σ = 0.667 px — CD 3σ ×11 ✓\n", encoding="utf-8")
+
+    # A second file, staged, so both porcelain shapes appear: " M path"
+    # (worktree-only, leading space) and "A  path" (staged, no leading space).
+    (repo / "added.txt").write_text("new\n", encoding="utf-8")
+    run("git", "add", "added.txt")
+
+    state = git_state(repo)
+    assert state["available"] is True
+    assert state["dirty"] is True
+    # Exact names: stripping porcelain's leading status column would silently
+    # shear the first character off worktree-only paths ("doc.md" -> "oc.md").
+    assert sorted(state["dirty_files"]) == ["added.txt", "doc.md"]
+    assert state["diff_sha256"] is not None
+
+
 def test_provenance_records_the_locked_test_split(tmp_path: Path) -> None:
     dataset = _write_burst(tmp_path / "data", num_sources=8)
     config = _config(dataset, tmp_path / "run", val_fraction=0.25, test_fraction=0.25)

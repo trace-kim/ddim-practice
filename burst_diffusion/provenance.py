@@ -47,13 +47,25 @@ def _git(*args: str, repo: Path) -> str | None:
             ["git", *args],
             cwd=repo,
             capture_output=True,
-            text=True,
+            # Decode as UTF-8 explicitly: `text=True` would use the system
+            # locale codec, which raises on any non-ASCII byte in a diff or
+            # filename (cp949/cp1252 Windows consoles hit this immediately on
+            # a document containing typographic characters) and leaves stdout
+            # as None. errors="replace" keeps provenance best-effort rather
+            # than letting a stray byte fail a run record.
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout.strip() if result.returncode == 0 else None
+    if result.returncode != 0 or result.stdout is None:
+        return None
+    # rstrip only: `git status --porcelain` encodes the index/worktree state in
+    # the first TWO columns (" M path" for a worktree-only change), so stripping
+    # leading whitespace shifts every path by one character.
+    return result.stdout.rstrip()
 
 
 def git_state(repo: Path) -> dict:
@@ -62,7 +74,11 @@ def git_state(repo: Path) -> dict:
     if commit is None:
         return {"available": False}
     status = _git("status", "--porcelain", repo=repo) or ""
-    dirty_files = sorted(line[3:] for line in status.splitlines() if line.strip())
+    # Porcelain v1: "XY PATH" -- two status columns then a space, so the path
+    # begins at index 3 and the leading columns must not be stripped first.
+    dirty_files = sorted(
+        line[3:] for line in status.splitlines() if len(line) > 3 and line.strip()
+    )
     diff = _git("diff", "HEAD", repo=repo) or ""
     return {
         "available": True,
