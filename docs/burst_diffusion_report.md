@@ -419,9 +419,12 @@ affected and none of them measures unseen-content generalization.
 
 The same defect is worse in the older `ddimctl` SEM run
 (`runs/2026-08-24/...__sem-ddim-local-32-full__...`): 1050 files with 185
-unique contents split by file index, so **every** validation file has an
-exact training duplicate (and the upstream corpus's own nominal val/test
-directories overlap its train directory completely). That run stands as a
+unique contents split by file index. Reproducing its 945/105 split exactly
+(sorted file list, `RandomState(2019)` shuffle) puts an exact training
+duplicate behind **105 of 105** validation files — all 76 distinct validation
+contents also occur in training. The upstream corpus's own nominal `val/` and
+`test/` directories overlap its `train/` completely as well (100/100 and
+92/92 contents). That run stands as a
 workflow demonstration only; its validation loss is not evidence of
 generalization. It was never a denoising experiment (unconditional DDPM,
 Gaussian-noise prediction), so no denoising claim rests on it.
