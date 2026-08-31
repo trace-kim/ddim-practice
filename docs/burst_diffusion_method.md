@@ -128,15 +128,137 @@ outside that subset, $N \ge T+1$.
 **If $K$ is drawn uniformly from $S$** ("included"), the minimizer is the
 identity map: $\varepsilon^\ast(\bar y, t) = \bar y$.
 
-*Proof.* $K$ is independent of the frames given $S$, so
+*Proof.* Average over $K$ first. Given $S$ and the frame values, $K$ is
+uniform on $S$ and independent of everything else, so
 
-$$\mathbb{E}[y_K \mid x_t] \;=\; \frac{1}{m}\sum_{j\in S}\mathbb{E}[y_j \mid x_t] \;=\; \frac{1}{m}\,\mathbb{E}\Bigl[\sum_{j\in S} y_j \;\Big|\; x_t\Bigr] \;=\; \frac{1}{m}\, m\, x_t \;=\; x_t. \qquad\blacksquare$$
+$$\mathbb{E}\bigl[y_K \;\big|\; x_t,\, S,\, \{y_j\}_{j\in S}\bigr] \;=\; \frac{1}{m}\sum_{j\in S} y_j \;=\; x_t,$$
 
-(The middle equality is linearity of conditional expectation;
-$\sum_{j\in S} y_j = m\,x_t$ is measurable w.r.t. $x_t$. For a *fixed*
-$k \in S$ the same conclusion follows from exchangeability of i.i.d. noise.)
-The objective then carries no learning signal — the network converges to a
-copy machine.
+which is already a function of $x_t$ alone. The tower property then removes
+the extra conditioning: $\mathbb{E}[y_K \mid x_t] = \mathbb{E}\bigl[x_t \mid x_t\bigr] = x_t$. $\blacksquare$
+
+(The network sees only $(\bar y, t)$, never $S$ or $K$, so the relevant
+conditional expectation marginalizes over both — harmless here, because the
+inner value came out as $x_t$ for *every* subset $S$. For a *fixed* $k \in S$
+the same conclusion follows from exchangeability: $\mathbb{E}[y_j \mid x_t]$ is
+the same for all $j \in S$ by symmetry of i.i.d. noise, and the $m$ of them
+sum to $m\,x_t$.) The objective then carries no learning signal — the network
+converges to a copy machine.
+
+**Where the Theorem 1 intuition breaks.** Both theorems open with the same
+decomposition,
+
+$$\mathbb{E}[y_K \mid x_t] \;=\; \mathbb{E}[x_0 \mid x_t] \;+\; \mathbb{E}[n_K \mid x_t],$$
+
+and the tempting move is to reuse Theorem 1's second step — "the noise is
+zero-mean, so the second term drops and a denoiser is left." It does not.
+$\mathbb{E}[n_K] = 0$ is an *unconditional* statement; what the optimum needs
+is $\mathbb{E}[n_K \mid x_t] = 0$, which holds only when the input carries no
+information about that particular realization. With $K \in S$ the frame $y_K$
+is one of the terms being averaged, so $n_K$ sits *inside* $x_t$ with weight
+$1/m$ and observing $x_t$ is partial evidence about it. Writing
+$\bar n_S := \frac1m\sum_{j\in S} n_j = x_t - x_0$, the value is exactly
+
+$$\mathbb{E}[n_K \mid x_t] \;=\; \frac{1}{m}\sum_{j\in S}\mathbb{E}[n_j \mid x_t] \;=\; \mathbb{E}\bigl[\bar n_S \mid x_t\bigr] \;=\; x_t - \mathbb{E}[x_0 \mid x_t],$$
+
+so the decomposition reads
+
+$$\underbrace{\mathbb{E}[x_0\mid x_t]}_{\text{the denoiser}} \;+\; \underbrace{\bigl(x_t - \mathbb{E}[x_0\mid x_t]\bigr)}_{\text{the leaked noise}} \;=\; x_t .$$
+
+That is the whole mechanism: the optimum still *contains* the posterior-mean
+denoiser, and is then required to add back precisely the residual that
+denoiser removed. The averaging is not defeated — it is undone.
+
+**The same fact without $x_0$.** The input is the mean of the $m$ frames in
+$S$; the target is one of those same $m$ frames, drawn uniformly and
+independently of their values. Nothing in $(\bar y, t)$ distinguishes the
+members of $S$ from one another, so the best $L^2$ guess of "a uniformly
+random member of this set" is the set's mean — which is the input, handed over
+for free. No image prior, no noise model, no $x_0$ enters the argument. The
+extreme case is $t = T$, where $m = 1$: the subset is one frame, the target
+*is* that frame, and the network is asked to copy its own input verbatim.
+
+**A worked Gaussian example.** Take scalar $x_0 \sim \mathcal{N}(\mu,\tau^2)$
+and $n_j \sim \mathcal{N}(0,\sigma^2)$ i.i.d., with $\mu = 0.4$, $\tau = 0.3$,
+$\sigma = 0.5$, $m = 4$. Everything is jointly Gaussian, so each conditional
+mean is affine in $x_t$; with $w := \tau^2/(\tau^2 + \sigma^2/m)$ the slopes are
+
+| conditional mean | slope in $x_t$ | value |
+|---|---|---|
+| $\mathbb{E}[x_0 \mid x_t]$ | $w$ | $0.590$ |
+| $\mathbb{E}[n_K \mid x_t]$, $K$ fresh | $0$ | $0$ |
+| $\mathbb{E}[n_K \mid x_t]$, $K \in S$ | $1 - w$ | $0.410$ |
+| $\mathbb{E}[y_K \mid x_t]$, $K \in S$ | $1$ | $1.000$ |
+
+(A 4M-sample Monte Carlo reproduces every entry to $\pm 10^{-4}$.) The middle
+two rows are the entire difference between the theorems — a fresh target's
+noise is uninformative, an included target's is 41% recoverable from the input
+— and $0.590 + 0.410 = 1$ is the cancellation above.
+
+**The objective actively penalizes the answer you want.** By the orthogonality
+of the next subsection, any $\varepsilon_\theta$ pays
+$\mathbb{E}\lVert\varepsilon_\theta - x_t\rVert^2$ above the floor. Predicting
+the *correct* denoiser $\mathbb{E}[x_0 \mid x_t]$ therefore costs
+$(\sigma^2/m)^2/(\tau^2 + \sigma^2/m) = 0.026$ in the toy numbers — a strictly
+worse score than the copy machine's. `included` is not merely uninformative
+about denoising; gradient descent is pushed away from it.
+
+**The tell is a *lower* loss, not a higher one.** Under (A1)–(A2) the
+identity's floor is, per pixel,
+
+$$\mathbb{E}\lVert x_t - y_K\rVert^2 \;=\; \mathbb{E}\lVert \bar n_S - n_K\rVert^2 \;=\; \sigma^2 - \frac{\sigma^2}{m} \;=\; \sigma^2\Bigl(1 - \frac{1}{m}\Bigr),$$
+
+against the fresh floor $\mathbb{E}[\operatorname{Var}(x_0\mid x_t)] + \sigma^2 \ge \sigma^2$
+derived below — so the degenerate objective bottoms out **strictly lower**, by
+at least $\sigma^2/m$ ($0.187$ vs $0.287$ in the toy numbers). Read on
+training loss alone, `included` looks like the better run. Two signatures
+separate them without any clean image:
+
+- **Opposite monotonicity in $t$.** The included floor is
+  $\sigma^2\bigl(1 - 1/m(t)\bigr)$: it *vanishes* at the noisiest level
+  $t = T$ (where $m = 1$) and rises toward $\sigma^2$ as $t \to 1$. The fresh
+  floor moves the other way — it never drops below $\sigma^2$, and decreases
+  toward it as the input gets cleaner. So `train/loss_by_t/*` fans out and
+  pins to $\approx 0$ at $t = T$ under `included`, which is diagnostic on its
+  own.
+- **Validation PSNR against clean is flat at the input's own PSNR**, since the
+  network reproduces its input. This is what actually catches the failure, and
+  is the concrete reason the report insists progress be read from validation
+  PSNR rather than the loss curve.
+
+**What the sampler does with a copy machine.** Substituting
+$\hat\varepsilon = x_t$ into the §4 update gives
+$x_{t'} = \bigl(m(t)\,x_t + (m(t')-m(t))\,x_t\bigr)/m(t') = x_t$: every level
+is a fixed point, the trajectory is constant, and both outputs equal the input
+measurement, $x_0^{\text{avg}} = x_0^{\text{pred}} = y_1$ (the closed form
+agrees: $(y_1 + T\,y_1)/(T+1) = y_1$). The method degrades to *returning the
+raw frame* — with nothing crashing to make it obvious. (Enforced by
+`test_identity_predictions_leave_the_input_unchanged` in
+`tests/test_burst_diffusion_sample.py`.)
+
+**Partial inclusion is partially degenerate.** The two theorems are endpoints
+of a continuum, which matters because near-misses are the realistic failure.
+If the target is fresh with probability $1-p$ and included with probability
+$p$ (drawn independently), linearity of conditional expectation gives
+
+$$\varepsilon^\ast(\bar y, t) \;=\; (1-p)\,\mathbb{E}[x_0 \mid x_t] \;+\; p\,x_t,$$
+
+a convex blend biased toward the identity in exact proportion to $p$: no
+threshold below which contamination is harmless, none above which learning
+stops. More generally, if the input is any weighted combination
+$x = x_0 + \sum_j c_j n_j$ and the target frame's own noise enters it with
+weight $c_K$, the Gaussian model gives
+
+$$\mathbb{E}[n_K \mid x] \;=\; \frac{c_K\,\sigma^2}{\tau^2 + \sigma^2\sum_j c_j^2}\,(x - \mu),$$
+
+which is zero exactly when $c_K = 0$. **The leakage coefficient $c_K$ — how
+much of the target's own noise realization is present in the input — is what
+controls the collapse**, and $K \notin S$ is simply the rule that forces
+$c_K = 0$. This is the quantitative shape of §5's rollout invariant 2: a
+rollout seed reused as its own target enters the pseudo-average with
+$c_{\text{seed}} = 1/m(s)$, hence a partial pull toward the identity —
+smaller at low $t$, never zero. (Indicative rather than exact there, since the
+pseudo-average's other terms are correlated model errors, not independent
+noise — which is why the seed is excluded outright rather than down-weighted.)
 
 **Why DDPM does not suffer this.** In DDPM the predicted $\varepsilon$ *is*
 inside $x_t$, but the mixture is weighted:
