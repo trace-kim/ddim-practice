@@ -4,6 +4,9 @@ Start here: [Training Quick Start / 학습 빠른 시작](TRAINING_GUIDE.md).
 
 For full operational details, see the reproducible [`ddimctl` training workflow](docs/training_workflow.md). The original `main.py` interface below is retained for legacy compatibility.
 
+For interpreting legacy SEM loss curves, resumed learning rates, and checkpoint
+selection, see [Legacy SEM training loss and checkpoint diagnostics](docs/legacy_sem_training_diagnostics.md).
+
 [Jiaming Song](http://tsong.me), [Chenlin Meng](http://cs.stanford.edu/~chenlin) and [Stefano Ermon](http://cs.stanford.edu/~ermon), Stanford
 
 Implements sampling from an implicit model that is trained with the same procedure as [Denoising Diffusion Probabilistic Model](https://hojonathanho.github.io/diffusion/), but costs much less time and compute if you want to sample from it (click image below for a video demo):
